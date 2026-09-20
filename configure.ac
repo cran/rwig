@@ -1,4 +1,4 @@
-AC_INIT([rwig],[0.1.0],[fangzhou.xie@rutgers.edu])
+AC_INIT([rwig],[0.2.0],[fangzhou.xie@rutgers.edu])
 
 # find R home and set correct compiler + flags
 : ${R_HOME="`R RHOME`"}
@@ -27,7 +27,9 @@ case "${host_os}" in
 	linux*)
 		AC_MSG_NOTICE([Linux detected, checking for CUDA...])
 
-		if test -z "$CUDA_FLAGS"; then
+		if test -n "$RWIG_NO_CUDA"; then
+			AC_MSG_NOTICE([RWIG_NO_CUDA is set, building without GPU support])
+		elif test -z "$CUDA_FLAGS"; then
 			AC_MSG_RESULT([no])
 
 			# Fallback: manual search
@@ -38,11 +40,23 @@ case "${host_os}" in
 					CUDA_FLAGS="-I${cudapath}/include"
 					CUDA_LIBS="-L${cudapath}/lib64 -lcudart -lcublas"
 					CUDA_DEFS="-DHAVE_CUBLAS -DHAVE_CUDA_RUNTIME"
+					# GPU architecture: double-precision atomicAdd needs sm_60+,
+					# and recent nvcc defaults to sm_52. Prefer the GPU present at
+					# build time (-arch=native), else a conservative sm_75.
+					CUDA_ARCH="-arch=sm_75"
+					if test -n "$RWIG_CUDA_ARCH"; then
+						CUDA_ARCH="$RWIG_CUDA_ARCH"
+					elif "$cudapath/bin/nvcc" -arch=native --version >/dev/null 2>&1; then
+						CUDA_ARCH="-arch=native"
+					fi
+					# object list: every .cpp and .cu under src/ (Makevars is
+					# only generated with CUDA rules, so it must list the .cu too)
+					OBJ_LIST=`cd src && ls *.cpp *.cu | sed -e 's/\.cpp$/.o/' -e 's/\.cu$/.o/' | tr '\n' ' '`
 					# CUDA compile rules
 				CUDA_RULES="NVCC = $cudapath/bin/nvcc
-NVCC_FLAGS = -x cu -Xcompiler -fPIC -O2 -std=c++17 -I../inst/include ${R_INCL} -DHAVE_CUBLAS -DHAVE_CUDA_RUNTIME
+NVCC_FLAGS = -x cu -Xcompiler -fPIC -O2 -std=c++17 ${CUDA_ARCH} -I../inst/include ${R_INCL} -DHAVE_CUBLAS -DHAVE_CUDA_RUNTIME
 
-OBJECTS = cuda_kernels.o cuda_sinkhorn.o cuda_barycenter.o cuda_optimizer.o cuda_wdl.o barycenter.o barycenter_impl_log.o barycenter_impl_parallel.o check_cuda.o RcppExports.o sinkhorn.o sinkhorn_impl_log.o sinkhorn_impl_vanilla.o tsvd.o utils.o wdl.o wdl_impl.o
+OBJECTS = ${OBJ_LIST}
 
 .PHONY: all
 
@@ -74,7 +88,9 @@ cuda_wdl.o: cuda_wdl.cu
 			fi
 		fi
 
-		if test -n "$CUDA_FLAGS"; then
+		if test -n "$RWIG_NO_CUDA"; then
+			:
+		elif test -n "$CUDA_FLAGS"; then
 			AC_MSG_NOTICE([CUDA support enabled])
 			AC_MSG_NOTICE([  CUDA_FLAGS: $CUDA_FLAGS])
 			AC_MSG_NOTICE([  CUDA_LIBS: $CUDA_LIBS])

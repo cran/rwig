@@ -362,12 +362,7 @@ N\)</span>, and we are aiming to compute the barycenter vector of size
 <span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>w <span class="ot">&lt;-</span> <span class="fu">c</span>(.<span class="dv">4</span>, .<span class="dv">6</span>)</span>
 <span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a>reg <span class="ot">&lt;-</span> .<span class="dv">1</span></span>
 <span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a></span>
-<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a>sol <span class="ot">&lt;-</span> <span class="fu">barycenter</span>(A, C, w, <span class="at">barycenter_control =</span> <span class="fu">list</span>(<span class="at">reg =</span> reg))</span>
-<span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a><span class="co">#&gt; `method` is automatically switched to &quot;log&quot;</span></span>
-<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a><span class="co">#&gt; Forward pass:</span></span>
-<span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a><span class="co">#&gt; iter: 1, err: 0.3207, last speed: 0.012, avg speed: 0.012</span></span>
-<span id="cb2-22"><a href="#cb2-22" tabindex="-1"></a><span class="co">#&gt; iter: 11, err: 0.0020, last speed: 0.000, avg speed: 0.001</span></span>
-<span id="cb2-23"><a href="#cb2-23" tabindex="-1"></a><span class="co">#&gt; iter: 21, err: 0.0000, last speed: 0.000, avg speed: 0.001</span></span></code></pre></div>
+<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a>sol <span class="ot">&lt;-</span> <span class="fu">barycenter</span>(A, C, w, <span class="at">barycenter_control =</span> <span class="fu">list</span>(<span class="at">reg =</span> reg))</span></code></pre></div>
 <div id="difference-from-sinkhorn" class="section level2">
 <h2>Difference from <code>sinkhorn()</code></h2>
 <p>The interface for <code>barycenter()</code> is almost identical to

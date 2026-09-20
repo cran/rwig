@@ -7,3 +7,6 @@ knitr::opts_chunk$set(
 ## ----setup--------------------------------------------------------------------
 library(rwig) |> suppressPackageStartupMessages()
 
+## ----eval = FALSE-------------------------------------------------------------
+# RhpcBLASctl::blas_set_num_threads(1)
+

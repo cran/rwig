@@ -9,6 +9,10 @@
 10.1016/j.econlet.2019.108874](https://img.shields.io/badge/doi-10.1016/j.econlet.2019.108874-yellow.svg)](https://doi.org/10.1016/j.econlet.2019.108874)
 [![experimental
 version](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+[![](https://www.r-pkg.org/badges/version/rwig?color=green)](https://cran.r-project.org/package=rwig)
+[![](http://cranlogs.r-pkg.org/badges/grand-total/rwig?color=green)](https://cran.r-project.org/package=rwig)
+[![CRAN
+checks](https://badges.cranchecks.info/summary/rwig.svg)](https://cran.r-project.org/web/checks/check_results_rwig.html)
 [![R build
 status](https://github.com/fangzhou-xie/rwig/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/fangzhou-xie/rwig/actions)
 [![License:
@@ -22,9 +26,10 @@ regularized Wasserstein Barycenter problems, Wasserstein Dictionary
 Learning (WDL) model, and **W**asserstein **I**ndex **G**eneration
 (**WIG**) model in **R** (see references below).
 
-All the methods are implemented from the ground up with C++ and
-Armadillo (with Rcpp and RcppArmadillo), with additional support for
-multi-threading for the log-stablized methods for
+All the methods are implemented from the ground up in C++ on top of R’s
+native C API, calling the BLAS/LAPACK libraries shipped with R directly,
+with additional support for multi-threading for the log-stablized
+methods for
 [sinkhorn](https://fangzhou-xie.github.io/rwig/reference/sinkhorn.html)
 and
 [barycenter](https://fangzhou-xie.github.io/rwig/reference/barycenter.html).
@@ -34,19 +39,23 @@ on multi-threading for faster processing.
 
 ## Installation
 
-<!-- This package is on [CRAN](https://cran.rstudio.com/), and I recommened  -->
-<!-- to use the `pak` to install it: -->
-<!-- ``` r -->
-<!-- # install pak if not already done so -->
-<!-- # install.packages("pak") -->
-<!-- pak::pak("rwig") -->
-<!-- # or you can install it in the classic way -->
-<!-- install.packages("rwig") -->
-<!-- ``` -->
+This package is on [CRAN](https://cran.rstudio.com/), and I recommend to
+use the `pak` to install it:
 
-The package is currently under heavy development and can only be
-considered as alpha stage. You can install the development version of
-`rwig` from [GitHub](https://github.com/) with:
+``` r
+# install pak if not already done so
+# install.packages("pak")
+pak::pak("rwig")
+
+# or you can install it in the classic way
+install.packages("rwig")
+```
+
+<!-- The package is currently under heavy development and can only be considered
+as alpha stage. -->
+
+You can install the development version of `rwig` from
+[GitHub](https://github.com/) with:
 
 ``` r
 # install.packages("pak")

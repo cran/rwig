@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <random>
+#include <vector>
 
 #include <R.h>
 #include <Rinternals.h>
@@ -16,32 +17,13 @@ static bool check_interrupt() {
   return !R_ToplevelExec(check_interrupt_fn, NULL);
 }
 
-// CUDA error checking macro — reports and jumps to cleanup on failure
-#define CUDA_CHECK(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = (call);                                                  \
-    if (err != cudaSuccess) {                                                  \
-      REprintf("CUDA error at %s:%d: %s\n", __FILE__, __LINE__,                \
-               cudaGetErrorString(err));                                       \
-      goto cleanup;                                                            \
-    }                                                                          \
-  } while (0)
-
 /*
   WDL kernels
 */
 
-// elementwise diag(a) * b: out[i] = a[i] * b[i]
-// launch with ceil(n / blockDim.x) blocks, blockDim.x threads
-__global__ void diagmul(int n, double *out, double *a, double *b) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n)
-    out[i] = a[i] * b[i];
-}
-
 // column-wise softmax: out[:,s] = softmax(in[:,s])
-// launch with ncols blocks, BLOCK_SIZE threads, shared mem = BLOCK_SIZE *
-// sizeof(double)
+// launch with ncols blocks, a power-of-two block (reduce_block), shared mem =
+// blockDim.x * sizeof(double)
 __global__ void softmax(int nrows, double *out, double *in) {
   int s = blockIdx.x;
   extern __shared__ double sdata[];
@@ -113,23 +95,6 @@ __global__ void batched_b_div_KTU(int N, int S, int D, double *V, double *b,
   }
 }
 
-// batched row product per doc: b[i, d] = prod_s KTU[i, d*S+s]
-// KTU is N x (S*D) (already powered), b is N x D
-// S is small so a serial loop per (i,d) pair is efficient
-__global__ void batched_row_prod(int N, int S, int D, double *b, double *KTU) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int stride = blockDim.x * gridDim.x;
-  int total = N * D;
-  for (int k = idx; k < total; k += stride) {
-    int i = k % N; // row
-    int d = k / N; // doc
-    double prod = 1.0;
-    for (int s = 0; s < S; s++)
-      prod *= KTU[i + (d * S + s) * N];
-    b[i + d * N] = prod;
-  }
-}
-
 // batched row sum per doc: bbar[i, d] = sum_s X[i, d*S+s]
 // X is N x (S*D), bbar is N x D
 // S is small so a serial loop per (i,d) pair is efficient
@@ -147,35 +112,143 @@ __global__ void batched_row_sum(int N, int S, int D, double *bbar, double *X) {
   }
 }
 
-// batched outer product: out[i, d*S+s] = bbar[i, d] * w[s, d]
-// bbar is N x D, w is S x D (column-major), out is N x (S*D)
-__global__ void batched_bbar_wT(int N, int S, int D, double *out, double *bbar,
-                                double *w) {
+// batched product of powers per doc: b[i, d] = prod_s KTU[i, d*S+s] ^ w[s, d].
+// tmp[k] = w * log(KTU[k]) over the N x (S*D) stack (column j = d*S+s has
+// weight wB[s + d*S] = wB[j]), then per (i, d) a sum over s and exp.
+__global__ void batched_wlog(int N, int SD, double *tmp, const double *KTU,
+                             const double *w) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
-  int total = N * S * D;
-  for (int k = idx; k < total; k += stride) {
-    int i = k % N;  // row
-    int ds = k / N; // column in stacked matrix
-    int s = ds % S; // topic index
-    int d = ds / S; // doc index
-    out[k] = bbar[i + d * N] * w[s + d * S];
+  for (int k = idx; k < N * SD; k += stride)
+    tmp[k] = w[k / N] * log(KTU[k]);
+}
+
+__global__ void batched_row_expsum(int N, int S, int D, double *b,
+                                   const double *tmp) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  for (int k = idx; k < N * D; k += stride) {
+    int i = k % N, d = k / N;
+    double acc = 0.0;
+    for (int s = 0; s < S; s++)
+      acc += tmp[i + (d * S + s) * N];
+    b[k] = exp(acc);
   }
 }
 
-// batched minus outer product
-__global__ void batched_div_bbar_wT(int N, int S, int D, double *Vbar,
-                                    double *KTU, double *bbar, double *w) {
+// per-doc squared residual of the fixed point: err[d] = sum_{i,s} (U % KV - A)^2
+// over doc d's N x S block (one block per doc, block reduction)
+__global__ void batched_sq_err(int N, int S, double *err, const double *U,
+                               const double *KV, const double *A) {
+  int d = blockIdx.x;
+  extern __shared__ double sdata[];
+  const double *Ud = U + (size_t)d * N * S;
+  const double *KVd = KV + (size_t)d * N * S;
+  double local = 0.0;
+  for (int k = threadIdx.x; k < N * S; k += blockDim.x) {
+    double r = Ud[k] * KVd[k] - A[k];
+    local += r * r;
+  }
+  sdata[threadIdx.x] = local;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride)
+      sdata[threadIdx.x] += sdata[threadIdx.x + stride];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) err[d] = sdata[0];
+}
+
+// per-doc normalization: b[:, d] /= sum(b[:, d]) (one block per doc)
+__global__ void batched_normalize(int N, double *b) {
+  int d = blockIdx.x;
+  extern __shared__ double sdata[];
+  double *bd = b + (size_t)d * N;
+  double local = 0.0;
+  for (int i = threadIdx.x; i < N; i += blockDim.x) local += bd[i];
+  sdata[threadIdx.x] = local;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride)
+      sdata[threadIdx.x] += sdata[threadIdx.x + stride];
+    __syncthreads();
+  }
+  const double inv = 1.0 / sdata[0];
+  for (int i = threadIdx.x; i < N; i += blockDim.x) bd[i] *= inv;
+}
+
+// tmp = UBbar % UB_hist[l+1] / KVB_hist[l] with UB_hist[l+1] = A_tiled / KVB_hist[l]
+__global__ void batched_UBbar_A_div_KV2(int N, int S, int D, double *tmp,
+                                        const double *UBbar, const double *A,
+                                        const double *KV) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
   int total = N * S * D;
   for (int k = idx; k < total; k += stride) {
-    int i = k % N;  // row
-    int ds = k / N; // column in stacked matrix
-    int s = ds % S; // topic index
-    int d = ds / S; // doc index
-    KTU[k] = Vbar[k] / KTU[k] - bbar[i + d * N] * w[s + d * S];
+    int i = k % N;
+    int s = (k / N) % S;
+    tmp[k] = (UBbar[k] * (A[i + s * N] / KV[k])) / KV[k];
   }
+}
+
+// tmp = (bBbar wB^T tiled) % VB_hist[l] with VB_hist[l] = bB_hist[l]_tiled / KTUB_hist[l]
+__global__ void batched_UBbar_L_tmp(int N, int S, int D, double *tmp,
+                                    const double *bBbar, const double *w,
+                                    const double *bB, const double *KTU) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  int total = N * S * D;
+  for (int k = idx; k < total; k += stride) {
+    int i = k % N;
+    int ds = k / N;
+    int s = ds % S;
+    int d = ds / S;
+    tmp[k] = bBbar[i + d * N] * w[s + d * S] * (bB[i + d * N] / KTU[k]);
+  }
+}
+
+// tmp = (bBbar wB^T - VBbar / KTUB_hist[l]) % VB_hist[l]
+__global__ void batched_UBbar_l_tmp(int N, int S, int D, double *tmp,
+                                    const double *bBbar, const double *w,
+                                    const double *VBbar, const double *bB,
+                                    const double *KTU) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  int total = N * S * D;
+  for (int k = idx; k < total; k += stride) {
+    int i = k % N;
+    int ds = k / N;
+    int s = ds % S;
+    int d = ds / S;
+    tmp[k] = (bBbar[i + d * N] * w[s + d * S] - VBbar[k] / KTU[k]) *
+             (bB[i + d * N] / KTU[k]);
+  }
+}
+
+// batched softmax Jacobian, one block per column:
+//   out[:, j] = a_j % g[:, j] - a_j * (a_j . g[:, j])
+// where a_j = a + (j % period) * n. Columns of g/out have length n.
+__global__ void batched_softmax_jac(int n, int period, double *out,
+                                    const double *g, const double *a) {
+  int j = blockIdx.x;
+  extern __shared__ double sdata[];
+  const double *aj = a + (j % period) * n;
+  const double *gj = g + j * n;
+  double *oj = out + j * n;
+
+  double local = 0.0;
+  for (int i = threadIdx.x; i < n; i += blockDim.x)
+    local += aj[i] * gj[i];
+  sdata[threadIdx.x] = local;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride)
+      sdata[threadIdx.x] += sdata[threadIdx.x + stride];
+    __syncthreads();
+  }
+  const double dot = sdata[0];
+  for (int i = threadIdx.x; i < n; i += blockDim.x)
+    oj[i] = aj[i] * gj[i] - aj[i] * dot;
 }
 
 // replicate a column vector to all columns of a matrix (column-major)
@@ -194,44 +267,13 @@ __global__ void replicate_col(int nrows, int ncols, double *out, double *col) {
   Wrapper functions for WDL kernels
 */
 
-void diagmul(double *out, double *a, double *b, int n, cudaStream_t &stream) {
-  int numBlocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  diagmul<<<numBlocks, BLOCK_SIZE, 0, stream>>>(n, out, a, b);
-}
-
-// wrapper for softmax
-void softmax(double *out, double *in, int nrows, int ncols) {
-  softmax<<<ncols, BLOCK_SIZE, BLOCK_SIZE * sizeof(double)>>>(nrows, out, in);
-}
-
-// Jacobian of softmax is diag(a) - a*a^T
-// alphabar = diag(a) * abar + (-1) * dot(a, abar) * a
-void update_softmax_jac(double *alphabar, double *abar, double *a, int n,
-                        cudaStream_t &stream, cublasHandle_t &handle) {
-  // alphabar = diag(a) * abar
-  diagmul(alphabar, a, abar, n, stream);
-  // temp = dot(a, abar)
-  double temp;
-  ddot(&temp, a, abar, n, handle);
-  // alphabar += (-1) * temp * a
-  daxpy(alphabar, -temp, a, n, handle);
-}
-
-// batched outer product: out[i, d*S+s] = bbar[i,d] * w[s,d]
-// bbar: N x D, w: S x D, out: N x (S*D)
-void nip_bbarwT(double *out, double *bbar, double *w, int N, int S, int D,
-                cudaStream_t &stream) {
-  int total = N * S * D;
-  int numBlocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  batched_bbar_wT<<<numBlocks, BLOCK_SIZE, 0, stream>>>(N, S, D, out, bbar, w);
-}
-
-void ip_div_bbarwT(double *KTU, double *Vbar, double *bbar, double *w, int N,
-                   int S, int D, cudaStream_t &stream) {
-  int total = N * S * D;
-  int numBlocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  batched_div_bbar_wT<<<numBlocks, BLOCK_SIZE, 0, stream>>>(N, S, D, Vbar, KTU,
-                                                            bbar, w);
+// Jacobian of softmax is diag(a) - a*a^T, applied to every column of g:
+// out[:, j] = a_j % g[:, j] - a_j * (a_j . g[:, j]), a_j = a[:, j % period]
+void update_softmax_jac(double *out, const double *g, const double *a, int n,
+                        int ncols, int period, cudaStream_t &stream) {
+  const int bs = reduce_block(n);
+  batched_softmax_jac<<<ncols, bs, bs * sizeof(double), stream>>>(n, period,
+                                                                  out, g, a);
 }
 
 // batched KV: KVB = K * VB
@@ -252,25 +294,18 @@ void update_KTUB(double *KTUB, double *K, double *UB, int N, int S, int D,
 // A: N x S (tiled), KVB: N x (S*D), UB: N x (S*D)
 void update_UB(double *UB, double *A, double *KVB, int N, int S, int D,
                cudaStream_t &stream) {
-  int total = N * S * D;
-  int numBlocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  batched_A_div_KV<<<numBlocks, BLOCK_SIZE, 0, stream>>>(N, S, D, UB, A, KVB);
+  batched_A_div_KV<<<nblocks(N * S * D), BLOCK_SIZE, 0, stream>>>(N, S, D, UB, A, KVB);
 }
 
-// batched b update: power KTU in-place, then row product per doc
-// KTUB is N x (S*D), wB is S x D, bB is N x D
-// NOTE: this modifies KTUB in-place (power step) — save to history first!
-void update_bB(double *bB, double *KTUB, double *wB, int N, int S, int D,
-               cudaStream_t &stream) {
-  // step 1: in-place power — KTUB[i, d*S+s] ^= wB[s, d]
-  // reuse existing ip_KTU_w: w[j] where j is column index in N x (S*D)
-  // j = d*S+s maps to wB[s + d*S] = wB[s, d] in column-major — correct!
-  ip_KTU_w(KTUB, wB, N, S * D, stream);
-
-  // step 2: row product per doc — bB[i, d] = prod_s KTUB[i, d*S+s]
-  int total = N * D;
-  int numBlocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  batched_row_prod<<<numBlocks, BLOCK_SIZE, 0, stream>>>(N, S, D, bB, KTUB);
+// batched b update: bB[i, d] = prod_s KTUB[i, d*S+s] ^ wB[s, d]
+// KTUB is N x (S*D) and left intact (needed for the V update), wB is S x D,
+// tmp is N*S*D scratch
+void update_bB(double *bB, double *KTUB, double *wB, double *tmp, int N, int S,
+               int D, cudaStream_t &stream) {
+  batched_wlog<<<nblocks(N * S * D), BLOCK_SIZE, 0, stream>>>(N, S * D, tmp,
+                                                              KTUB, wB);
+  batched_row_expsum<<<nblocks(N * D), BLOCK_SIZE, 0, stream>>>(N, S, D, bB,
+                                                                tmp);
 }
 
 // batched bbar at final iteration: bBbar[i,d] = 2*(bB[i,d] - b_ext[i,d])
@@ -281,21 +316,23 @@ void update_bBbar_L(double *bBbar, double *bB, double *bB_ext, int N, int D,
   nip_minus_2(bBbar, bB, bB_ext, N * D, stream);
 }
 
-void update_UBbar_L(double *UBbar, double *bBbar, double *VBhist, int l,
-                    double *wB, double *K, double *KTUB, int N, int S, int D,
-                    cudaStream_t &stream, cublasHandle_t &handle) {
-  // implement `bbarwT` kernel
-  nip_bbarwT(KTUB, bBbar, wB, N, S, D, stream);
-  ip_dot(KTUB, VBhist + (size_t)l * N * S * D, N * S * D, stream);
+// UBbar = K * ((bBbar wB^T) % VB_hist[L]); VB_hist[L] = bB_hist[L] / KTUB_hist[L]
+void update_UBbar_L(double *UBbar, double *bBbar, double *bBhist,
+                    double *KTUBhist, int l, double *wB, double *K,
+                    double *KTUB, int N, int S, int D, cudaStream_t &stream,
+                    cublasHandle_t &handle) {
+  batched_UBbar_L_tmp<<<nblocks(N * S * D), BLOCK_SIZE, 0, stream>>>(
+      N, S, D, KTUB, bBbar, wB, bBhist + (size_t)l * N * D,
+      KTUBhist + (size_t)l * N * S * D);
   dgemm(UBbar, 1.0, K, false, KTUB, false, N, S * D, N, 0.0, handle);
 }
 
-void update_VBbar_l(double *VBbar, double *UBbar, double *UBhist,
-                    double *VBhist, double *KVBhist, int l, double *K,
-                    double *KVB, int N, int S, int D, cudaStream_t &stream,
-                    cublasHandle_t &handle) {
-  nip_dot_div(KVB, UBbar, UBhist + (size_t)(l + 1) * N * S * D,
-              KVBhist + (size_t)l * N * S * D, N * S * D, stream);
+// VBbar = -K^T * (UBbar % UB_hist[l+1] / KVB_hist[l]); UB_hist[l+1] = A / KVB_hist[l]
+void update_VBbar_l(double *VBbar, double *UBbar, double *A, double *KVBhist,
+                    int l, double *K, double *KVB, int N, int S, int D,
+                    cudaStream_t &stream, cublasHandle_t &handle) {
+  batched_UBbar_A_div_KV2<<<nblocks(N * S * D), BLOCK_SIZE, 0, stream>>>(
+      N, S, D, KVB, UBbar, A, KVBhist + (size_t)l * N * S * D);
   dgemm(VBbar, -1.0, K, true, KVB, false, N, S * D, N, 0.0, handle);
 }
 
@@ -307,29 +344,25 @@ void update_bBbar_l(double *bBbar, double *VBbar, double *KTUBhist, int l,
   // step 1: KTUB = VBbar / KTUBhist_l (elementwise)
   nip_div(KTUB, VBbar, KTUBhist + (size_t)l * N * S * D, N * S * D, stream);
   // step 2: bBbar[i,d] = sum_s KTUB[i, d*S+s] (batched row sum)
-  int total = N * D;
-  int numBlocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  batched_row_sum<<<numBlocks, BLOCK_SIZE, 0, stream>>>(N, S, D, bBbar, KTUB);
+  batched_row_sum<<<nblocks(N * D), BLOCK_SIZE, 0, stream>>>(N, S, D, bBbar, KTUB);
 }
 
-void update_UBbar_l(double *UBbar, double *VBbar, double *bBbar, double *VBhist,
+// UBbar = K * ((bBbar wB^T - VBbar / KTUB_hist[l]) % VB_hist[l])
+void update_UBbar_l(double *UBbar, double *VBbar, double *bBbar, double *bBhist,
                     double *KTUBhist, int l, double *wB, double *K,
                     double *KTUB, int N, int S, int D, cudaStream_t &stream,
                     cublasHandle_t &handle) {
-  nip_div(KTUB, VBbar, KTUBhist + (size_t)l * N * S * D, N * S * D, stream);
-  for (int d = 0; d < D; d++)
-    dger(KTUB + d * N * S, N, S, -1.0, bBbar + d * N, wB + d * S, handle);
-  ip_dot(KTUB, VBhist + (size_t)l * N * S * D, N * S * D, stream);
-  dgemm(UBbar, -1.0, K, false, KTUB, false, N, S * D, N, 0.0, handle);
+  batched_UBbar_l_tmp<<<nblocks(N * S * D), BLOCK_SIZE, 0, stream>>>(
+      N, S, D, KTUB, bBbar, wB, VBbar, bBhist + (size_t)l * N * D,
+      KTUBhist + (size_t)l * N * S * D);
+  dgemm(UBbar, 1.0, K, false, KTUB, false, N, S * D, N, 0.0, handle);
 }
 
 // batched V update: VB[i, d*S+s] = bB[i, d] / KTUB[i, d*S+s]
 // bB: N x D, KTUB: N x (S*D), VB: N x (S*D)
 void update_VB(double *VB, double *bB, double *KTUB, int N, int S, int D,
                cudaStream_t &stream) {
-  int total = N * S * D;
-  int numBlocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  batched_b_div_KTU<<<numBlocks, BLOCK_SIZE, 0, stream>>>(N, S, D, VB, bB,
+  batched_b_div_KTU<<<nblocks(N * S * D), BLOCK_SIZE, 0, stream>>>(N, S, D, VB, bB,
                                                           KTUB);
 }
 
@@ -357,16 +390,64 @@ void update_wBbar(double *wbar, double *bBbar, double *bBhist, double *KTUBhist,
 // column-wise softmax: out = softmax(in), each column independently
 void softmax(double *out, double *in, int nrows, int ncols,
              cudaStream_t &stream) {
-  size_t sharedMem = BLOCK_SIZE * sizeof(double);
-  softmax<<<ncols, BLOCK_SIZE, sharedMem, stream>>>(nrows, out, in);
+  const int bs = reduce_block(nrows);
+  softmax<<<ncols, bs, bs * sizeof(double), stream>>>(nrows, out, in);
 }
 
 // broadcast: out (nrows x ncols) = col * ones^T
 void replicate_col(double *out, double *col, int nrows, int ncols,
                    cudaStream_t &stream) {
-  int n = nrows * ncols;
-  int numBlocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  replicate_col<<<numBlocks, BLOCK_SIZE, 0, stream>>>(nrows, ncols, out, col);
+  replicate_col<<<nblocks(nrows * ncols), BLOCK_SIZE, 0, stream>>>(nrows, ncols, out, col);
+}
+
+/*
+  wdl_infer_batch: barycenters of D documents at once (forward only).
+
+  Same batched forward as training, but iterated until every document in
+  the batch satisfies ||U % KV - A||_F <= zero_tol (or max_iter), with one
+  host read of D residuals per iteration instead of one per document.
+  Documents that converge early keep iterating with the batch, which only
+  moves them closer to their fixed point. The barycenters (normalized to
+  sum 1) are written to Yhat.
+*/
+
+void wdl_infer_batch(double *Yhat, double *A, double *W, double *K,
+                     double *UB, double *VB, double *bB, double *KVB,
+                     double *KTUB, double *tmp, double *d_err,
+                     std::vector<double> &h_err,
+                     int batch_id, int B, int M, int N, int S, int max_iter,
+                     double zero_tol, cudaStream_t &stream,
+                     cublasHandle_t &handle) {
+  auto D2D = cudaMemcpyDeviceToDevice;
+  auto D2H = cudaMemcpyDeviceToHost;
+  const int D = (batch_id == (M / B)) ? (M % B) : B;
+  if (D <= 0) return;
+  double *wB = W + batch_id * B * S; // S x D
+
+  init_ones(UB, N * S * D, stream);
+  init_ones(VB, N * S * D, stream);
+  update_KVB(KVB, K, VB, N, S, D, handle);
+
+  const int bs = reduce_block(N * S);
+  double err = 1000.0;
+  for (int iter = 0; iter < max_iter && err > zero_tol; ++iter) {
+    update_UB(UB, A, KVB, N, S, D, stream);
+    update_KTUB(KTUB, K, UB, N, S, D, handle);
+    update_bB(bB, KTUB, wB, tmp, N, S, D, stream);
+    update_VB(VB, bB, KTUB, N, S, D, stream);
+    update_KVB(KVB, K, VB, N, S, D, handle);
+    // err = max over docs of the per-doc residual norm
+    batched_sq_err<<<D, bs, bs * sizeof(double), stream>>>(N, S, d_err, UB,
+                                                            KVB, A);
+    cudaMemcpyAsync(h_err.data(), d_err, sizeof(double) * D, D2H, stream);
+    cudaStreamSynchronize(stream);
+    err = 0.0;
+    for (int d = 0; d < D; ++d) err = fmax(err, sqrt(h_err[d]));
+  }
+  const int bsn = reduce_block(N);
+  batched_normalize<<<D, bsn, bsn * sizeof(double), stream>>>(N, bB);
+  cudaMemcpyAsync(Yhat + (size_t)batch_id * B * N, bB, sizeof(double) * N * D,
+                  D2D, stream);
 }
 
 /*
@@ -395,9 +476,8 @@ void wdl_batch(
     // batched scratch (sized for B docs)
     double *UB, double *VB, double *bB, // N*(S*B), N*(S*B), N*B
     double *KVB, double *KTUB,          // N*(S*B), N*(S*B)
-    // batched history buffers
-    double *UB_hist, double *VB_hist, double *bB_hist, double *KVB_hist,
-    double *KTUB_hist,
+    // batched history buffers (U and V are recovered from these)
+    double *bB_hist, double *KVB_hist, double *KTUB_hist,
     // adjoint buffers
     double *UBbar, double *VBbar, double *bBbar, // N*(S*B), N*(S*B), N*B
     double *ABbar, double *wBbar,                // N*S, S*B
@@ -431,10 +511,6 @@ void wdl_batch(
   init_ones(UB, N * S * D, stream);
   init_ones(VB, N * S * D, stream);
 
-  // save initial history
-  cudaMemcpyAsync(UB_hist, UB, sizeof(double) * N * S * D, D2D, stream);
-  cudaMemcpyAsync(VB_hist, VB, sizeof(double) * N * S * D, D2D, stream);
-
   // ---- FORWARD: fixed max_iter iterations ----
   for (int l = 0; l < max_iter; ++l) {
     // KV = K * V
@@ -444,23 +520,19 @@ void wdl_batch(
 
     // U = A / KV
     update_UB(UB, A, KVB, N, S, D, stream);
-    cudaMemcpyAsync(UB_hist + (size_t)(l + 1) * N * S * D, UB,
-                    sizeof(double) * N * S * D, D2D, stream);
 
     // KTU = K^T * U
     update_KTUB(KTUB, K, UB, N, S, D, handle);
     cudaMemcpyAsync(KTUB_hist + (size_t)(l + 1) * N * S * D, KTUB,
                     sizeof(double) * N * S * D, D2D, stream);
 
-    // b = row_prod(KTU^w)  — modifies KTUB in-place (power step)
-    update_bB(bB, KTUB, wB, N, S, D, stream);
+    // b = row_prod(KTU^w)  (KTUB left intact; UBbar is free scratch here)
+    update_bB(bB, KTUB, wB, UBbar, N, S, D, stream);
     cudaMemcpyAsync(bB_hist + (size_t)(l + 1) * N * D, bB,
                     sizeof(double) * N * D, D2D, stream);
 
-    // V = b / KTU  — use pre-power KTU from history
-    update_VB(VB, bB, KTUB_hist + (size_t)(l + 1) * N * S * D, N, S, D, stream);
-    cudaMemcpyAsync(VB_hist + (size_t)(l + 1) * N * S * D, VB,
-                    sizeof(double) * N * S * D, D2D, stream);
+    // V = b / KTU
+    update_VB(VB, bB, KTUB, N, S, D, stream);
   }
 
   // ---- BACKWARD: l = max_iter down to 1 ----
@@ -469,16 +541,16 @@ void wdl_batch(
       // bBbar = 2*(bBhist[l] - bB_ext)
       update_bBbar_L(bBbar, bB_hist + (size_t)l * N * D, bB_ext, N, D, stream);
       // UBbar = K * (bBbar*wB^T % VBhist[l])
-      update_UBbar_L(UBbar, bBbar, VB_hist, l, wB, K, KTUB, N, S, D, stream,
-                     handle);
+      update_UBbar_L(UBbar, bBbar, bB_hist, KTUB_hist, l, wB, K, KTUB, N, S, D,
+                     stream, handle);
     } else {
       // VBbar = -K^T * (UBbar * UBhist[l+1] / KVBhist[l])
-      update_VBbar_l(VBbar, UBbar, UB_hist, VB_hist, KVB_hist, l, K, KVB, N, S,
-                     D, stream, handle);
+      update_VBbar_l(VBbar, UBbar, A, KVB_hist, l, K, KVB, N, S, D, stream,
+                     handle);
       // bBbar = row_sum(VBbar / KTUBhist[l])
       update_bBbar_l(bBbar, VBbar, KTUB_hist, l, KTUB, N, S, D, stream);
-      // UBbar = -K * (VBbar/KTUBhist[l] - bBbar*wB^T) % VBhist[l]
-      update_UBbar_l(UBbar, VBbar, bBbar, VB_hist, KTUB_hist, l, wB, K, KTUB, N,
+      // UBbar = K * (bBbar*wB^T - VBbar/KTUBhist[l]) % VBhist[l]
+      update_UBbar_l(UBbar, VBbar, bBbar, bB_hist, KTUB_hist, l, wB, K, KTUB, N,
                      S, D, stream, handle);
     }
 
@@ -491,18 +563,12 @@ void wdl_batch(
 
   // ---- GRADIENT ACCUMULATION ----
   // softmax Jacobian: chain rule through softmax(Alpha) → A
-  // UB is used as intermediate; loop through D * S columns
-  for (int j = 0; j < D * S; j++) {
-    int s = j % S;
-    update_softmax_jac(UB + j * N, ABbar + j * N, A + s * N, N, stream, handle);
-  }
+  // UB is used as intermediate (D * S columns, column j uses A[:, j % S])
+  update_softmax_jac(UB, ABbar, A, N, D * S, S, stream);
 
   // softmax Jacobian: chain rule through softmax(Lambda) → W
-  // use bBbar as intermediate; loop through D docs
-  for (int d = 0; d < D; d++) {
-    update_softmax_jac(bBbar + d * S, wBbar + d * S, wB + d * S, S, stream,
-                       handle);
-  }
+  // bBbar is used as intermediate (D columns of length S, column d uses wB[:, d])
+  update_softmax_jac(bBbar, wBbar, wB, S, D, D, stream);
 
   // reduce UB from N x (S*D) to N x S by summing D blocks into block 0
   for (int d = 1; d < D; d++)
@@ -558,7 +624,7 @@ void cuda_wdl(
   cudaStream_t stream;
   auto H2D = cudaMemcpyHostToDevice;
   auto D2H = cudaMemcpyDeviceToHost;
-  auto D2D = cudaMemcpyDeviceToDevice;
+  // auto D2D = cudaMemcpyDeviceToDevice;
 
   /* step 1: create cublas handle, bind a stream */
   cublasCreate(&handle);
@@ -580,13 +646,13 @@ void cuda_wdl(
   double *d_UB = nullptr, *d_VB = nullptr, *d_bB = nullptr;
   double *d_KVB = nullptr, *d_KTUB = nullptr;
   // batched history buffers
-  double *d_UB_hist = nullptr, *d_VB_hist = nullptr, *d_bB_hist = nullptr;
+  double *d_bB_hist = nullptr;
   double *d_KVB_hist = nullptr, *d_KTUB_hist = nullptr;
   // batched adjoint buffers
   double *d_UBbar = nullptr, *d_VBbar = nullptr, *d_bBbar = nullptr;
   double *d_ABbar = nullptr, *d_wBbar = nullptr;
-  // inference output
-  double *d_Yhat = nullptr;
+  // inference output and per-doc residuals of a batch
+  double *d_Yhat = nullptr, *d_err = nullptr;
 
   // variables declared here so goto cleanup doesn't bypass initialization
   std::mt19937 rng(seed);
@@ -595,10 +661,9 @@ void cuda_wdl(
   int L = max_iter + 1; // history depth
   int batches = (M % B) ? (M / B + 1) : (M / B);
   int step = 0;
+  std::vector<double> h_err((size_t)B);
 
   /* step 3: allocate device memory */
-  cudaMemPool_t pool;
-  cudaDeviceGetDefaultMemPool(&pool, 0);
 
   // data
   CUDA_CHECK(cudaMallocAsync((void **)&d_Y, sizeof(double) * N * M, stream));
@@ -640,10 +705,6 @@ void cuda_wdl(
   CUDA_CHECK(
       cudaMallocAsync((void **)&d_KTUB, sizeof(double) * N * S * B, stream));
   // batched history buffers
-  CUDA_CHECK(cudaMallocAsync((void **)&d_UB_hist,
-                             sizeof(double) * L * N * S * B, stream));
-  CUDA_CHECK(cudaMallocAsync((void **)&d_VB_hist,
-                             sizeof(double) * L * N * S * B, stream));
   CUDA_CHECK(
       cudaMallocAsync((void **)&d_bB_hist, sizeof(double) * L * N * B, stream));
   CUDA_CHECK(cudaMallocAsync((void **)&d_KVB_hist,
@@ -661,8 +722,9 @@ void cuda_wdl(
       cudaMallocAsync((void **)&d_ABbar, sizeof(double) * N * S * B, stream));
   CUDA_CHECK(
       cudaMallocAsync((void **)&d_wBbar, sizeof(double) * S * B, stream));
-  // inference output
+  // inference output and per-doc residuals
   CUDA_CHECK(cudaMallocAsync((void **)&d_Yhat, sizeof(double) * N * M, stream));
+  CUDA_CHECK(cudaMallocAsync((void **)&d_err, sizeof(double) * B, stream));
 
   /* step 4: initialize data on device */
 
@@ -723,9 +785,9 @@ void cuda_wdl(
 
       // compute batch-averaged gradients
       wdl_batch(d_g_Alpha, d_g_lambda, d_g_Lambda, d_A, d_W, d_Y, d_K, d_UB,
-                d_VB, d_bB, d_KVB, d_KTUB, d_UB_hist, d_VB_hist, d_bB_hist,
-                d_KVB_hist, d_KTUB_hist, d_UBbar, d_VBbar, d_bBbar, d_ABbar,
-                d_wBbar, batch_id, B, M, N, S, max_iter, stream, handle);
+                d_VB, d_bB, d_KVB, d_KTUB, d_bB_hist, d_KVB_hist, d_KTUB_hist,
+                d_UBbar, d_VBbar, d_bBbar, d_ABbar, d_wBbar, batch_id, B, M, N,
+                S, max_iter, stream, handle);
 
       // optimizer step
       step++;
@@ -751,28 +813,18 @@ void cuda_wdl(
   if (verbose)
     Rprintf("Inference on the dataset\n");
 
-  for (int m = 0; m < M; ++m) {
-    double *d_w_m = d_W + m * S;
-
-    // reset scaling vectors (reuse batched buffers for single doc)
-    init_ones(d_UB, N * S, stream);
-    init_ones(d_VB, N * S, stream);
-
-    int iter = 0;
-    double err = 1000.0;
-
-    // forward only (withgrad = false) — history/adjoint buffers not accessed
-    impl_barycenter(iter, err, d_UB, d_VB, d_bB, d_UBbar, d_VBbar, d_bBbar,
-                    d_ABbar, d_wBbar, d_UB_hist, d_VB_hist, d_bB_hist,
-                    d_KVB_hist, d_KTUB_hist, d_A, d_w_m, d_Y + m * N, d_K,
-                    d_KVB, d_KTUB, N, N, S, max_iter, zero_tol, false, stream,
-                    handle);
-
-    // store barycenter into Yhat column
-    cudaMemcpyAsync(d_Yhat + m * N, d_bB, sizeof(double) * N, D2D, stream);
-
-    if (verbose && ((m + 1) % B == 0 || m == M - 1))
-      Rprintf("  Inference: %d of %d docs done\n", m + 1, M);
+  for (int batch_id = 0; batch_id < batches; ++batch_id) {
+    cudaStreamSynchronize(stream);
+    if (check_interrupt()) {
+      if (verbose)
+        Rprintf("User interrupt detected, cleaning up...\n");
+      goto cleanup;
+    }
+    wdl_infer_batch(d_Yhat, d_A, d_W, d_K, d_UB, d_VB, d_bB, d_KVB, d_KTUB,
+                    d_UBbar, d_err, h_err, batch_id, B, M, N, S, max_iter,
+                    zero_tol, stream, handle);
+    if (verbose)
+      Rprintf("  Inference: batch %d of %d done\n", batch_id + 1, batches);
   }
 
   /* step 7: copy results to host */
@@ -801,8 +853,6 @@ cleanup:
   cudaFreeAsync(d_bB, stream);
   cudaFreeAsync(d_KVB, stream);
   cudaFreeAsync(d_KTUB, stream);
-  cudaFreeAsync(d_UB_hist, stream);
-  cudaFreeAsync(d_VB_hist, stream);
   cudaFreeAsync(d_bB_hist, stream);
   cudaFreeAsync(d_KVB_hist, stream);
   cudaFreeAsync(d_KTUB_hist, stream);
@@ -812,6 +862,7 @@ cleanup:
   cudaFreeAsync(d_ABbar, stream);
   cudaFreeAsync(d_wBbar, stream);
   cudaFreeAsync(d_Yhat, stream);
+  cudaFreeAsync(d_err, stream);
 
   cudaStreamDestroy(stream);
   cublasDestroy(handle);

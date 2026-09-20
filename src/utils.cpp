@@ -1,116 +1,94 @@
 
 // definition file for the utility functions
 
-#include <string> // std::string
-#include <vector> // std::vector
+#include <cmath>
+#include <stdexcept>
+#include <string>        // std::string
+#include <unordered_map> // std::unordered_map
+#include <vector>        // std::vector
 
-#include "common.hpp"
-
-// using namespace arma;
+#include "r_glue.hpp"
 
 /////////////////////////////////////////////////////////////////////
 // to be called in utils.R
 /////////////////////////////////////////////////////////////////////
 
-// Euclidean matrix based on embeddings
-// [[Rcpp::export]]
-arma::mat euclidean_cpp(const arma::mat &A) {
-  // convert AR to A
-  // mat A = as_Mat(AR);
+// Euclidean distance matrix between the rows of A (embeddings)
+static SEXP euclidean_impl(SEXP AR) {
+  la::Mat A = rr::mat_from_R(AR);
+  const la::idx n = A.nrow(), d = A.ncol();
 
-  // create output matrix
-  arma::mat euc = arma::mat(A.n_rows, A.n_rows, arma::fill::zeros);
+  // transpose once so that each embedding is contiguous (d x n)
+  la::Mat At(d, n);
+  for (la::idx j = 0; j < d; ++j)
+    for (la::idx i = 0; i < n; ++i) At(j, i) = A(i, j);
 
-  double c = 0.;
-  for (size_t i = 0; i < A.n_rows; ++i) {
-    for (size_t j = 0; j < A.n_rows; ++j) {
-      if (i < j) {
-        c = sqrt(accu(square(A.row(i) - A.row(j))));
-        euc(i, j) = c;
-        euc(j, i) = c;
+  la::Mat euc(n, n);
+  for (la::idx i = 0; i < n; ++i) {
+    const double *ai = At.col(i);
+    for (la::idx j = i + 1; j < n; ++j) {
+      const double *aj = At.col(j);
+      double c = 0.;
+      for (la::idx k = 0; k < d; ++k) {
+        const double diff = ai[k] - aj[k];
+        c += diff * diff;
       }
+      c = std::sqrt(c);
+      euc(i, j) = c;
+      euc(j, i) = c;
     }
   }
-  // return as_doubles_matrix(euc);
-  return euc;
+  return rr::to_R(euc);
 }
 
-// [[Rcpp::export]]
-arma::mat doc2dist_cpp(Rcpp::List docs, Rcpp::CharacterVector dict) {
+extern "C" SEXP rwig_euclidean_cpp(SEXP AR) {
+  return rr::call_guard([&]() -> SEXP { return euclidean_impl(AR); });
+}
+
+static SEXP doc2dist_impl(SEXP docs, SEXP dict) {
   // docs: list of character vectors
   // dict: character vector of the dictionary
+  if (TYPEOF(docs) != VECSXP) throw std::runtime_error("docs must be a list");
+  if (TYPEOF(dict) != STRSXP) throw std::runtime_error("dict must be a character vector");
+  const int n_dict = (int)Rf_xlength(dict);
+  const int n_docs = (int)Rf_xlength(docs);
+
+  // token -> index lookup (first occurrence wins, as std::find did)
+  std::unordered_map<std::string, int> lookup;
+  lookup.reserve((std::size_t)n_dict);
+  for (int k = 0; k < n_dict; ++k) {
+    lookup.emplace(std::string(CHAR(STRING_ELT(dict, k))), k);
+  }
+  // tokens missing from the dictionary are counted under the last entry
+  const int last = n_dict - 1;
 
   // create output matrix
-  arma::mat docmat(dict.size(), docs.size(), arma::fill::zeros);
+  la::Mat docmat((la::idx)n_dict, (la::idx)n_docs);
 
   // loop the documents
-  for (int j = 0; j < docs.size(); ++j) {
-
-    // cpp11::strings docs_j = docs[j];
-    std::vector<std::string> docs_j = docs[j];
+  for (int j = 0; j < n_docs; ++j) {
+    SEXP doc = VECTOR_ELT(docs, j);
+    if (TYPEOF(doc) != STRSXP)
+      throw std::runtime_error("each document must be a character vector");
+    double *col = docmat.col(j);
 
     // loop the tokens inside doc
-    for (long unsigned int k = 0; k < docs_j.size(); ++k) {
-      // cpp11::r_string s = docs_j[k];
-      std::string s = docs_j[k];
-      auto it = std::find(dict.begin(), dict.end(), s);
-      int idx = std::distance(dict.begin(), it);
-      idx = (idx == dict.size()) ? dict.size() - 1 : idx;
-      docmat(idx, j) += 1;
+    const R_xlen_t n_tok = Rf_xlength(doc);
+    for (R_xlen_t k = 0; k < n_tok; ++k) {
+      auto it = lookup.find(std::string(CHAR(STRING_ELT(doc, k))));
+      const int idx = (it == lookup.end()) ? last : it->second;
+      col[idx] += 1;
     } // END of loop tokens
 
     // scale the matrix so that each col sum to 1
-    docmat.col(j) /= accu(docmat.col(j));
+    double total = 0.;
+    for (la::idx i = 0; i < docmat.nrow(); ++i) total += col[i];
+    for (la::idx i = 0; i < docmat.nrow(); ++i) col[i] /= total;
   } // END of loop documents
 
-  // return as_doubles_matrix(docmat);
-  return docmat;
+  return rr::to_R(docmat);
 }
 
-// /////////////////////////////////////////////////////////////////////
-// // Optimizers
-// /////////////////////////////////////////////////////////////////////
-//
-// // optimizer: SGD
-// void optimizer_sgd(mat &theta, mat &gtheta,
-//                    mat &mtheta, mat &vtheta,
-//                    int &t,
-//                    const double eta = .001, const double gamma = .01,
-//                    double beta1 = .9, double beta2 = .999,
-//                    double eps = 1e-8) {
-//   theta = theta - eta * gtheta;
-//   t++;
-// }
-//
-// // optimizer: Adam
-// void optimizer_adam(mat &theta, mat &gtheta,
-//                     mat &mtheta, mat &vtheta,
-//                     int &t,
-//                     const double eta = .001, const double gamma = .01,
-//                     double beta1 = .9, double beta2 = .999,
-//                     double eps = 1e-8) {
-//   mtheta = beta1 * mtheta + (1 - beta1) * gtheta;
-//   vtheta = beta2 * vtheta + (1 - beta2) * pow(gtheta, 2);
-//   mat mhat = mtheta / (1 - pow(beta1, t));
-//   mat vhat = vtheta / (1 - pow(beta2, t));
-//   theta = theta - eta * (mhat / (sqrt(vhat) + eps));
-//   t++;
-// }
-//
-//
-// // optimizer: AdamW
-// void optimizer_adamw(mat &theta, mat &gtheta,
-//                      mat &mtheta, mat &vtheta,
-//                      int &t,
-//                      const double eta = .001, const double gamma = .01,
-//                      double beta1 = .9, double beta2 = .999,
-//                      double eps = 1e-8) {
-//   // gtheta = gtheta + lambda * theta;
-//   mtheta = beta1 * mtheta + (1 - beta1) * gtheta;
-//   vtheta = beta2 * vtheta + (1 - beta2) * pow(gtheta, 2);
-//   mat mhat = mtheta / (1 - pow(beta1, t));
-//   mat vhat = vtheta / (1 - pow(beta2, t));
-//   // theta = theta - eta * (mhat / (sqrt(vhat) + eps)) - eta * gamma * theta;
-//   theta = (1 - eta*gamma) * theta - eta * (mhat / (sqrt(vhat) + eps));
-//   t++;
-// }
+extern "C" SEXP rwig_doc2dist_cpp(SEXP docs, SEXP dict) {
+  return rr::call_guard([&]() -> SEXP { return doc2dist_impl(docs, dict); });
+}

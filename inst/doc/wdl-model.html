@@ -361,38 +361,38 @@ of topic models. Here, we consider the Wasserstein Dicionary Learning
 <span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a><span class="co">#&gt; Initializing WDL model with 5 vocabs, 3 docs, and 2 topics...</span></span>
 <span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a><span class="co">#&gt; Training WDL model with 2 epochs, 1 batches</span></span>
 <span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a><span class="co">#&gt; Epoch 1 of 2, batch 1 of 1</span></span>
-<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a><span class="co">#&gt;   batch time: 0.01 sec</span></span>
+<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a><span class="co">#&gt;   batch time: 0.00 sec</span></span>
 <span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a><span class="co">#&gt; Epoch 2 of 2, batch 1 of 1</span></span>
 <span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a><span class="co">#&gt;   batch time: 0.00 sec</span></span>
 <span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a><span class="co">#&gt; Inference on the dataset</span></span>
-<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a><span class="co">#&gt;   Inference: 3 of 3 docs done</span></span>
+<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a><span class="co">#&gt;   Inference: batch 1 of 1 done</span></span>
 <span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a></span>
 <span id="cb2-22"><a href="#cb2-22" tabindex="-1"></a>wdl_fit</span>
 <span id="cb2-23"><a href="#cb2-23" tabindex="-1"></a><span class="co">#&gt; WDL model topics:</span></span>
 <span id="cb2-24"><a href="#cb2-24" tabindex="-1"></a><span class="co">#&gt; </span></span>
 <span id="cb2-25"><a href="#cb2-25" tabindex="-1"></a><span class="co">#&gt; Topic 1:</span></span>
 <span id="cb2-26"><a href="#cb2-26" tabindex="-1"></a><span class="co">#&gt; sentenc     yet   anoth     one    &lt;/s&gt; </span></span>
-<span id="cb2-27"><a href="#cb2-27" tabindex="-1"></a><span class="co">#&gt;   0.482   0.201   0.197   0.071   0.048 </span></span>
+<span id="cb2-27"><a href="#cb2-27" tabindex="-1"></a><span class="co">#&gt;   0.475   0.207   0.198   0.071   0.048 </span></span>
 <span id="cb2-28"><a href="#cb2-28" tabindex="-1"></a><span class="co">#&gt; </span></span>
 <span id="cb2-29"><a href="#cb2-29" tabindex="-1"></a><span class="co">#&gt; Topic 2:</span></span>
 <span id="cb2-30"><a href="#cb2-30" tabindex="-1"></a><span class="co">#&gt; sentenc     one   anoth    &lt;/s&gt;     yet </span></span>
-<span id="cb2-31"><a href="#cb2-31" tabindex="-1"></a><span class="co">#&gt;   0.419   0.255   0.176   0.112   0.039</span></span></code></pre></div>
+<span id="cb2-31"><a href="#cb2-31" tabindex="-1"></a><span class="co">#&gt;   0.426   0.249   0.176   0.111   0.038</span></span></code></pre></div>
 <p>We can see from the topics that they are vectors of the tokens
 (words) with associated probabilities. If you want to access the topics,
 you can do this:</p>
 <div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>wdl_fit<span class="sc">$</span>topics</span>
 <span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a><span class="co">#&gt;             topic1     topic2</span></span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a><span class="co">#&gt; one     0.07082487 0.25479149</span></span>
-<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a><span class="co">#&gt; yet     0.20149596 0.03862156</span></span>
-<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a><span class="co">#&gt; anoth   0.19719629 0.17623633</span></span>
-<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a><span class="co">#&gt; sentenc 0.48236498 0.41868685</span></span>
-<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a><span class="co">#&gt; &lt;/s&gt;    0.04811789 0.11166377</span></span></code></pre></div>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a><span class="co">#&gt; one     0.07121514 0.24889845</span></span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a><span class="co">#&gt; yet     0.20669865 0.03848785</span></span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a><span class="co">#&gt; anoth   0.19828341 0.17563601</span></span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a><span class="co">#&gt; sentenc 0.47541972 0.42569336</span></span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a><span class="co">#&gt; &lt;/s&gt;    0.04838309 0.11128432</span></span></code></pre></div>
 <p>Alternatively, you can also obtain the weights of the topics used to
 re-construct the input data:</p>
 <div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>wdl_fit<span class="sc">$</span>weights</span>
 <span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="co">#&gt;             [,1]      [,2]      [,3]</span></span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a><span class="co">#&gt; topic1 0.5644257 0.6153338 0.4026389</span></span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a><span class="co">#&gt; topic2 0.4355743 0.3846662 0.5973611</span></span></code></pre></div>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a><span class="co">#&gt; topic1 0.4026816 0.6153758 0.5644693</span></span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a><span class="co">#&gt; topic2 0.5973184 0.3846242 0.4355307</span></span></code></pre></div>
 <div id="see-also" class="section level2">
 <h2>See Also</h2>
 <p>See also <code>vignette(&quot;specs&quot;)</code>.</p>

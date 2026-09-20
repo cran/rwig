@@ -1,0 +1,39 @@
+# R wrappers around the registered .Call entry points (see src/init.cpp).
+# The native symbols are exposed with the `C_` prefix via
+# useDynLib(rwig, .registration = TRUE, .fixes = "C_").
+
+barycenter_parallel_cpp <- function(A, C, w, reg, b_ext, withgrad = FALSE, usecuda = TRUE, maxiter = 1000L, zerotol = 1e-6, verbose = 0L) {
+  .Call(C_barycenter_parallel_cpp, A, C, w, reg, b_ext, withgrad, usecuda, maxiter, zerotol, verbose)
+}
+
+barycenter_log_cpp <- function(A, C, w, reg, b_ext, withgrad = FALSE, n_threads = 0L, maxiter = 1000L, zerotol = 1e-6, verbose = 0L) {
+  .Call(C_barycenter_log_cpp, A, C, w, reg, b_ext, withgrad, n_threads, maxiter, zerotol, verbose)
+}
+
+cuda_available_cpp <- function() {
+  .Call(C_cuda_available_cpp)
+}
+
+sinkhorn_vanilla_cpp <- function(a, b, C, reg, withgrad = FALSE, usecuda = TRUE, maxiter = 1000L, zerotol = 1e-6, verbose = 0L) {
+  .Call(C_sinkhorn_vanilla_cpp, a, b, C, reg, withgrad, usecuda, maxiter, zerotol, verbose)
+}
+
+sinkhorn_log_cpp <- function(a, b, C, reg, withgrad = FALSE, n_threads = 0L, maxiter = 1000L, zerotol = 1e-6, verbose = 0L) {
+  .Call(C_sinkhorn_log_cpp, a, b, C, reg, withgrad, n_threads, maxiter, zerotol, verbose)
+}
+
+tsvd_cpp <- function(MR, k, flip_sign) {
+  .Call(C_tsvd_cpp, MR, k, flip_sign)
+}
+
+euclidean_cpp <- function(AR) {
+  .Call(C_euclidean_cpp, AR)
+}
+
+doc2dist_cpp <- function(docs, dict) {
+  .Call(C_doc2dist_cpp, docs, dict)
+}
+
+wdl_cpp <- function(Y, C, reg, S, n_threads, batch_size, epochs, sinkhorn_mode = 1L, usecuda = TRUE, max_iter = 1000L, zero_tol = 1e-6, optimizer = 2L, eta = .001, gamma = .01, beta1 = .9, beta2 = .999, eps = 1e-8, verbose = FALSE, seed = 42L) {
+  .Call(C_wdl_cpp, Y, C, reg, S, n_threads, batch_size, epochs, sinkhorn_mode, usecuda, max_iter, zero_tol, optimizer, eta, gamma, beta1, beta2, eps, verbose, seed)
+}

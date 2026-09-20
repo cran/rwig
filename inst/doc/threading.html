@@ -359,6 +359,27 @@ set threading as the default? This is because threading comes with an
 overhead, and sometimes for small problems, it can even be slower than
 serial processing. So be sure to benchmark your code and see if
 threading actually helps.</p>
+<div id="blas-threads" class="section level2">
+<h2>BLAS threads</h2>
+<p><code>rwig</code> calls the BLAS library that R is linked against for
+its matrix products. Some BLAS libraries (OpenBLAS, MKL) run
+multi-threaded by default. Because <code>rwig</code> already
+parallelizes the expensive log-domain kernels through
+<code>n_threads</code>, and because most of its BLAS calls are small,
+letting the BLAS spawn its own threads on top usually oversubscribes the
+cores and slows things down. We therefore recommend a single BLAS thread
+while using <code>rwig</code>.</p>
+<p><code>rwig</code> does not change this setting for you (it is a
+session-wide setting that also affects every other package). If the
+optional package <code>RhpcBLASctl</code> is installed, the startup
+message reports the current BLAS thread count, and you can set it for
+the session with</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>RhpcBLASctl<span class="sc">::</span><span class="fu">blas_set_num_threads</span>(<span class="dv">1</span>)</span></code></pre></div>
+<p>The exception is <code>wdl()</code>/<code>wig()</code> on the CPU
+with an optimized BLAS: their cost is dominated by large matrix
+products, so a multi-threaded BLAS can help there. Benchmark both
+settings on your own problem sizes.</p>
+</div>
 <div id="see-also" class="section level2">
 <h2>See Also</h2>
 <p>See also <code>vignette(&quot;sinkhorn&quot;)</code>,

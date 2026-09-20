@@ -360,11 +360,11 @@ default, it is</p>
 <span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>)</span></code></pre></div>
 <ol style="list-style-type: decimal">
 <li><code>group_unit</code> dictates at which level of time to group the
-documents, and it will be passed to <code>lubridate::floor_date()</code>
-as the <code>unit</code> argument. The default option is “month” to
-obtain monthly time series index, and other options can be specified
-following the <code>unit</code> argument in
-<code>lubridate::floor_date()</code>.</li>
+documents, and it is passed to <code>cut()</code> as the
+<code>breaks</code> argument (see <code>?cut.Date</code>). The default
+option is “month” to obtain a monthly time series index; other options
+include “day”, “week” (starting on Monday), “quarter”, “year”, or
+multiples such as “2 months”.</li>
 <li><code>svd_method</code> can be either “docs” or “topics”. The “doc”
 method means the Truncated SVD will be applied on the reconstructed
 documents to get the index directly; whereas “topics” means TSVD will be
