@@ -94,12 +94,8 @@ void Sinkhorn::_fwd_vanilla() {
   _u.resize(_M, 1.0);
   _v.resize(_N, 1.0);
   if (_withgrad) {
-    _uhist.clear();
-    _vhist.clear();
-    _uhist.reserve(_maxiter + 1);
-    _vhist.reserve(_maxiter + 1);
-    _uhist.push_back(_u);
-    _vhist.push_back(_v);
+    reset_history(_uhist, _maxiter, _u);
+    reset_history(_vhist, _maxiter, _v);
   }
   _log_stage("Forward pass:");
 

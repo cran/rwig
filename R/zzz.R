@@ -110,25 +110,15 @@ startup_info_message <- function() {
     collapse = "\n"
   )
 
-  # TODO: add the following citation after the software paper becomes public
-  cite_soft <- paste0(
-    c(
-      " The software paper is:"
-    )
-  )
-
   cite_msg <- cli::format_inline(
     cli::col_blue(cli::symbol$info),
     c(
       " Please use the following to cite my works, thanks!\n\n",
       cite_meth,
       "\n"
-      # cite_soft,
-      # "\n"
     )
   )
 
-  # paste0(info_rule, "\n", info_msg, "\n\n", cite_rule, "\n", cite_msg, "\n")
   paste0("\n", cite_rule, "\n", cite_msg, "\n")
 }
 

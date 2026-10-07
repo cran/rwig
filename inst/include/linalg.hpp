@@ -247,6 +247,18 @@ inline int gesdd_thin(const Mat &A, Mat &U, Vec &s, Mat &Vt) {
 }
 
 // largest singular value of A (arma::norm(A, 2) for a matrix)
+// sum_k (u_k kv_k - a_k)^2: squared residual of the fixed point u % (K v) = a
+// that the Gibbs-kernel barycenter iterates towards (its stopping rule)
+inline double resid_sq(idx n, const double *u, const double *kv,
+                       const double *a) {
+  double e = 0.0;
+  for (idx k = 0; k < n; ++k) {
+    const double d = u[k] * kv[k] - a[k];
+    e += d * d;
+  }
+  return e;
+}
+
 inline double spectral_norm(const Mat &A) {
   const int m = (int)A.nrow(), n = (int)A.ncol();
   const int r = std::min(m, n);
@@ -291,10 +303,21 @@ public:
     mul(trans, x.data(), y.data());
   }
 
-  // Y <- op(K) X on the first `cols` columns of X and Y
+  // Y <- op(K) X on the first `cols` columns of X and Y.
+  //
+  // Level-3 BLAS packs the whole N x N kernel on every call, which for a
+  // handful of right-hand columns (the barycenter with S topics) costs more
+  // than the product itself: dsymm_iutcopy was 28-37% of the parallel
+  // barycenter's profile. Up to SKINNY_COLS columns go through one
+  // dsymv / dgemv per column instead, measured faster at every size tried
+  // (dsymv reads only half of K): 889 x 889, 4 columns: 0.44 ms -> 0.19 ms.
+  static constexpr idx SKINNY_COLS = 4;
+
   void mul(bool trans, const Mat &X, Mat &Y, idx cols) const {
     const int n = (int)K.nrow(), c = (int)cols;
-    if (symmetric) {
+    if (cols <= SKINNY_COLS) {
+      for (idx j = 0; j < cols; ++j) mul(trans, X.col(j), Y.col(j));
+    } else if (symmetric) {
       symm(n, c, 1.0, K.data(), n, X.data(), (int)X.nrow(), 0.0, Y.data(),
            (int)Y.nrow());
     } else {

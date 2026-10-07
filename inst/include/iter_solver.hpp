@@ -5,9 +5,19 @@
 #ifndef RWIG_ITER_SOLVER_H
 #define RWIG_ITER_SOLVER_H
 
+#include <vector>
+
 #include "r_glue.hpp"
 #include "timer.hpp"
 #include "vformat.hpp"
+
+// start a per-iteration history with `first` as slot 0, room for `cap` more
+template <typename T>
+inline void reset_history(std::vector<T> &hist, int cap, const T &first) {
+  hist.clear();
+  hist.reserve(cap + 1);
+  hist.push_back(first);
+}
 
 class IterSolver {
 public:

@@ -10,7 +10,7 @@
 
 void Barycenter::compute_log(const int &n_threads) {
   _reset_counter();
-  _scratch.resize((int)_M, (int)_N, _withgrad);
+  _scratch.resize((int)_M);
 
   ThreadPool pool(n_threads); // worker threads live for the whole computation
   _fwd_log(pool);
@@ -39,15 +39,9 @@ void Barycenter::_fwd_log(ThreadPool &pool) {
   this->U.resize(_M, _S); // F
   this->V.resize(_N, _S); // G
   if (_withgrad) {
-    _Uhist.clear();
-    _Vhist.clear();
-    _logbhist.clear();
-    _Uhist.reserve(_maxiter + 1);
-    _Vhist.reserve(_maxiter + 1);
-    _logbhist.reserve(_maxiter + 1);
-    _Uhist.push_back(this->U);  // F hist
-    _Vhist.push_back(this->V);  // G hist
-    _logbhist.push_back(_logb); // logb hist
+    reset_history(_Uhist, _maxiter, this->U); // F
+    reset_history(_Vhist, _maxiter, this->V); // G
+    reset_history(_logbhist, _maxiter, _logb);
   }
   _logA.resize(_M, _S);
   for (la::idx k = 0; k < _A.size(); ++k) _logA[k] = std::log(_A[k]);
@@ -58,6 +52,10 @@ void Barycenter::_fwd_log(ThreadPool &pool) {
   la::Mat err_mat(_M, _S);
   _log_stage("Forward pass:");
   _minrow(pool, this->U, this->V, _KV);
+  if (_withgrad) {
+    reset_history(_KVhist, _maxiter, _KV);              // Rminrow of R(F^0, G^0)
+    reset_history(_KTUhist, _maxiter, la::Mat(_N, _S)); // slot 0 unused
+  }
 
   while (_keep_going()) {
     rr::check_interrupt();
@@ -71,6 +69,7 @@ void Barycenter::_fwd_log(ThreadPool &pool) {
 
     // update logb = -(G + Rmincol) w / reg
     _mincol(pool, this->U, this->V, _KTU);
+    if (_withgrad) _KTUhist.push_back(_KTU); // Rmincol of R(F^l, G^{l-1})
     for (la::idx j = 0; j < _N; ++j) _logb[j] = 0.0;
     for (la::idx s = 0; s < _S; ++s) {
       const double *Vs = this->V.col(s);
@@ -90,6 +89,7 @@ void Barycenter::_fwd_log(ThreadPool &pool) {
 
     // err = || -Rminrow / reg - logA ||_2 (spectral norm, as arma::norm(mat, 2))
     _minrow(pool, this->U, this->V, _KV);
+    if (_withgrad) _KVhist.push_back(_KV); // Rminrow of R(F^l, G^l)
     for (la::idx k = 0; k < err_mat.size(); ++k)
       err_mat[k] = -_KV[k] / _reg - _logA[k];
     err = la::spectral_norm(err_mat);
@@ -116,11 +116,12 @@ void Barycenter::_bwd_log(ThreadPool &pool) {
   for (int l = iter; l > 0; --l) {
     _tic();
 
-    // adjoint of G (only for l < L): Gbar_s = -X^T Fbar_s, X from R(F^l_s, G^l_s)
+    // adjoint of G (only for l < L): Gbar_s = -X^T Fbar_s, X from
+    // R(F^l_s, G^l_s), whose row soft-min the forward pass stored
     if (l != iter) {
       for (la::idx s = 0; s < _S; ++s) {
-        logdom::apply_XT(pool, p, _Uhist[l].col(s), _Vhist[l].col(s), -1.0,
-                         Fbar.col(s), Gbar.col(s), _scratch);
+        logdom::apply_XT(pool, p, _Uhist[l].col(s), _Vhist[l].col(s),
+                         _KVhist[l].col(s), -1.0, Fbar.col(s), Gbar.col(s));
       }
     }
 
@@ -136,10 +137,12 @@ void Barycenter::_bwd_log(ThreadPool &pool) {
       }
     }
 
-    // adjoint of F: Fbar_s = W y_s, W from R(F^l_s, G^{l-1}_s), with
+    // adjoint of F: Fbar_s = W y_s, W from R(F^l_s, G^{l-1}_s) (column
+    // soft-min stored by the forward pass), with
     // y_s = (w_s / reg) logbbar - Gbar_s  (Gbar_s = 0 at l = L)
     for (la::idx s = 0; s < _S; ++s) {
       const double *g = _Vhist[l - 1].col(s);
+      const double *rmin = _KTUhist[l].col(s);
       const double ws_reg = _w[s] / _reg;
       if (l == iter) {
         for (la::idx j = 0; j < _N; ++j) y[j] = logbbar[j];
@@ -147,23 +150,17 @@ void Barycenter::_bwd_log(ThreadPool &pool) {
         const double *Gs = Gbar.col(s);
         for (la::idx j = 0; j < _N; ++j) y[j] = ws_reg * logbbar[j] - Gs[j];
       }
-      logdom::apply_W(pool, p, _Uhist[l].col(s), g, 1.0, y.data(), Fbar.col(s),
-                      _scratch);
+      logdom::apply_W(pool, p, _Uhist[l].col(s), g, rmin, 1.0, y.data(),
+                      Fbar.col(s), _scratch);
       if (l == iter) {
         double *Fs = Fbar.col(s);
         for (la::idx i = 0; i < _M; ++i) Fs[i] *= ws_reg;
       }
 
-      // adjoint of w (without reg scaling), reusing the column soft-min of
-      // R(F^l, G^{l-1}) left in the scratch by apply_W:
+      // adjoint of w (without reg scaling):
       // grad_w[s] -= (G^{l-1}_s + Rmincol_s)^T logbbar
-      const double *colmin = _scratch.colmin.data();
-      const double *colsum = _scratch.colsum.data();
       double acc = 0.0;
-      for (la::idx j = 0; j < _N; ++j) {
-        const double rmin = colmin[j] - _reg * std::log(colsum[j]);
-        acc += (g[j] + rmin) * logbbar[j];
-      }
+      for (la::idx j = 0; j < _N; ++j) acc += (g[j] + rmin[j]) * logbbar[j];
       this->grad_w[s] -= acc;
     }
     _toc_bwd(l);

@@ -13,7 +13,7 @@
 
 struct WdlArgs {
   double reg;
-  int S, n_threads, batch_size, epochs, sinkhorn_mode, max_iter, optimizer;
+  int S, batch_size, epochs, max_iter, optimizer;
   double zero_tol, eta, gamma, beta1, beta2, eps;
   bool verbose;
   int seed;
@@ -24,10 +24,9 @@ static SEXP wdl_cpp_cpu(SEXP Y, SEXP C, const WdlArgs &a) {
   la::Mat C_ = rr::mat_from_R(C);
 
   // init the WDL class
-  WassersteinDictionaryLearning wdl(a.batch_size, a.epochs, a.n_threads,
-                                    a.sinkhorn_mode, a.max_iter, a.zero_tol,
-                                    a.optimizer, a.eta, a.gamma, a.beta1,
-                                    a.beta2, a.eps, a.verbose);
+  WassersteinDictionaryLearning wdl(a.batch_size, a.epochs, a.max_iter,
+                                    a.zero_tol, a.optimizer, a.eta, a.gamma,
+                                    a.beta1, a.beta2, a.eps, a.verbose);
 
   //  with data
   wdl.init_data(Y_, C_, a.reg, a.S);
@@ -75,19 +74,17 @@ static SEXP wdl_cpp_cuda(SEXP Y, SEXP C, const WdlArgs &a) {
 Interfaces for the R side
 */
 
-extern "C" SEXP rwig_wdl_cpp(SEXP Y, SEXP C, SEXP reg, SEXP S, SEXP n_threads,
-                             SEXP batch_size, SEXP epochs, SEXP sinkhorn_mode,
-                             SEXP usecuda, SEXP max_iter, SEXP zero_tol,
-                             SEXP optimizer, SEXP eta, SEXP gamma, SEXP beta1,
-                             SEXP beta2, SEXP eps, SEXP verbose, SEXP seed) {
+extern "C" SEXP rwig_wdl_cpp(SEXP Y, SEXP C, SEXP reg, SEXP S,
+                             SEXP batch_size, SEXP epochs, SEXP usecuda,
+                             SEXP max_iter, SEXP zero_tol, SEXP optimizer,
+                             SEXP eta, SEXP gamma, SEXP beta1, SEXP beta2,
+                             SEXP eps, SEXP verbose, SEXP seed) {
   return rr::call_guard([&]() -> SEXP {
     WdlArgs a;
     a.reg = rr::as_double(reg);
     a.S = rr::as_int(S);
-    a.n_threads = rr::as_int(n_threads);
     a.batch_size = rr::as_int(batch_size);
     a.epochs = rr::as_int(epochs);
-    a.sinkhorn_mode = rr::as_int(sinkhorn_mode);
     a.max_iter = rr::as_int(max_iter);
     a.zero_tol = rr::as_double(zero_tol);
     a.optimizer = rr::as_int(optimizer);
@@ -98,11 +95,6 @@ extern "C" SEXP rwig_wdl_cpp(SEXP Y, SEXP C, SEXP reg, SEXP S, SEXP n_threads,
     a.eps = rr::as_double(eps);
     a.verbose = rr::as_bool(verbose);
     a.seed = rr::as_int(seed);
-
-    // check sinkhorn mode
-    if ((a.sinkhorn_mode != 1) && (a.sinkhorn_mode != 2)) {
-      throw std::runtime_error("Sinkhorn mode not supported");
-    }
 
     // check optimizer mode
     if ((a.optimizer != 0) && (a.optimizer != 1) && (a.optimizer != 2)) {

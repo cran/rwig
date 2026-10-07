@@ -54,30 +54,23 @@ wdl <- function(docs, ...) {
   UseMethod("wdl")
 }
 
-#' @rdname wdl
-#' @export
-wdl.character <- function(docs, specs = wdl_specs(), verbose = TRUE, ...) {
-  # unpack the arguments for the model
-  wdl_args <- specs$wdl_control
+# tokenize, embed (word2vec) and turn `docs` into the inputs of the WDL
+# model: the distance matrix C between the vocabulary and the matrix Y of
+# per-document token distributions (internal; shared with data-raw/bench)
+wdl_preprocess <- function(docs, specs = wdl_specs(), verbose = FALSE) {
   tok_args <- specs$tokenizer_control
   w2v_args <- specs$word2vec_control
-  brc_args <- specs$barycenter_control
-  opt_args <- specs$optimizer_control
 
   if (verbose) {
     message("Preprocessing the data...")
     message("Running tokenizer on the sentences...")
   }
-
-  # docs: character vector of input docs
-  # first tokenize and embed
   tok_args <- append(list(x = docs), tok_args)
   toks <- do.call(tokenizers::tokenize_word_stems, args = tok_args)
 
   if (verbose) {
     message("Running Word2Vec for the embeddings and distance matrix...")
   }
-
   w2v_args <- append(list(x = toks), w2v_args)
   model <- do.call(word2vec::word2vec, args = w2v_args)
   emb <- as.matrix(model)
@@ -90,18 +83,31 @@ wdl.character <- function(docs, specs = wdl_specs(), verbose = TRUE, ...) {
     ))
   }
 
-  # get distance matrix C and docs in dist Y
-  distmat <- euclidean(emb)
-  docdist <- doc2dist(toks, rownames(emb))
+  list(C = euclidean(emb), Y = doc2dist(toks, rownames(emb)), vocab = rownames(emb))
+}
+
+#' @rdname wdl
+#' @export
+wdl.character <- function(docs, specs = wdl_specs(), verbose = TRUE, ...) {
+  # unpack the arguments for the model
+  wdl_args <- specs$wdl_control
+  brc_args <- specs$barycenter_control
+  opt_args <- specs$optimizer_control
+
+  pp <- wdl_preprocess(docs, specs, verbose)
+  distmat <- pp$C
+  docdist <- pp$Y
 
   # train on a shuffled copy of the documents; outputs are put back into
   # the input order below
   perm <- if (wdl_args$shuffle) sample.int(ncol(docdist)) else seq_len(ncol(docdist))
 
-  # dispatch the barycenter method if "auto"
-  brc_args$verbose <- verbose
-  brc_args <- resolve_method(brc_args, distmat, "parallel")
-  sinkhorn_mode <- if (brc_args$method == "log") 2L else 1L
+  # WDL trains and infers with the batched Gibbs-kernel barycenter; the
+  # `method` of the barycenter control is not used (see wdl_specs())
+  if (verbose && identical(brc_args$method, "log")) {
+    message("Note: WDL uses the batched Gibbs-kernel barycenter; ",
+            "the log-domain method is not used.")
+  }
 
   # running the WDL model here
   res <- wdl_cpp(
@@ -109,10 +115,8 @@ wdl.character <- function(docs, specs = wdl_specs(), verbose = TRUE, ...) {
     distmat,
     brc_args$reg, # reg
     wdl_args$num_topics, # S
-    brc_args$n_threads, # num of threads
     wdl_args$batch_size, # batch_size
     wdl_args$epochs, # epochs
-    sinkhorn_mode, # barycenter algorithm: 1 parallel, 2 log
     brc_args$use_cuda, # useCuda
     brc_args$max_iter, # maxIter of Sinkhorn
     brc_args$zero_tol, # zeroTol of Sinkhorn
@@ -132,8 +136,8 @@ wdl.character <- function(docs, specs = wdl_specs(), verbose = TRUE, ...) {
   Yhat <- res$Yhat[, inv, drop = FALSE]
 
   # from the topics/weights matrices, build the topics matrix
-  rownames(topics) <- rownames(emb)
-  rownames(Yhat) <- rownames(emb)
+  rownames(topics) <- pp$vocab
+  rownames(Yhat) <- pp$vocab
   colnames(topics) <- paste0("topic", seq_len(wdl_args$num_topics))
   rownames(weights) <- paste0("topic", seq_len(wdl_args$num_topics))
 

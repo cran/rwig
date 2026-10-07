@@ -33,8 +33,12 @@ private:
   // history of u and v in the forward pass for vanilla (f,g for log)
   std::vector<la::Vec> _uhist, _vhist;
 
-  // for log algo
+  // for log algo; _Rminrowhist[l] is _Rminrow (the row soft-min) of
+  // R(f^l, g^l), kept by the forward pass so the backward pass can form the
+  // row softmax without a stabilisation sweep (the column soft-min of the
+  // same R is -reg log b)
   la::Vec _loga, _logb, _Rminrow, _Rmincol;
+  std::vector<la::Vec> _Rminrowhist;
   logdom::Scratch _scratch;
   logdom::Problem _prob() const {
     return logdom::Problem{_C.data(), (int)_M, (int)_N, _reg};

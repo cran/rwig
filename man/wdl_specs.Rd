@@ -58,7 +58,10 @@ section. In \code{barycenter_control}, \code{with_grad} is always \code{TRUE} (t
 gradients are what WDL trains on) and \code{max_iter} is the fixed number of
 barycenter iterations per training step, so keep it small: the batched
 training keeps a history of \code{max_iter} iterations for every document
-in a batch.
+in a batch. WDL trains and predicts with the batched Gibbs-kernel
+barycenter (the "parallel" method), on all documents of a batch at once,
+so \code{method}, \code{threshold} and \code{n_threads} are not used by \code{\link[=wdl]{wdl()}} and
+\code{\link[=wig]{wig()}}; \code{reg}, \code{max_iter}, \code{zero_tol} and \code{use_cuda} are.
 }
 \references{
 Peyré, G., & Cuturi, M. (2019). Computational Optimal Transport:

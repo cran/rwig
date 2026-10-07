@@ -14,7 +14,7 @@ SEXP rwig_barycenter_parallel_cpp(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP,
 SEXP rwig_barycenter_log_cpp(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP,
                              SEXP, SEXP);
 SEXP rwig_wdl_cpp(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP,
-                  SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
+                  SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
 SEXP rwig_tsvd_cpp(SEXP, SEXP, SEXP);
 SEXP rwig_euclidean_cpp(SEXP);
 SEXP rwig_doc2dist_cpp(SEXP, SEXP);
@@ -28,7 +28,7 @@ static const R_CallMethodDef CallEntries[] = {
     CALLDEF(sinkhorn_log_cpp, 9),
     CALLDEF(barycenter_parallel_cpp, 10),
     CALLDEF(barycenter_log_cpp, 10),
-    CALLDEF(wdl_cpp, 19),
+    CALLDEF(wdl_cpp, 17),
     CALLDEF(tsvd_cpp, 3),
     CALLDEF(euclidean_cpp, 1),
     CALLDEF(doc2dist_cpp, 2),

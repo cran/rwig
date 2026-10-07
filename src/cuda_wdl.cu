@@ -381,10 +381,11 @@ void update_wBbar(double *wbar, double *bBbar, double *bBhist, double *KTUBhist,
   nip_log(KTUB, KTUBhist + (size_t)l * N * S * D, N * S * D, stream);
   // bBbar *= bBhist_l
   ip_dot(bBbar, bBhist + (size_t)l * N * D, N * D, stream);
-  // wbar_d += KTUB_d^T * bBbar_d for each d
-  for (int d = 0; d < D; d++)
-    dgemv(wbar + d * S, 1.0, KTUB + d * N * S, N, S, true, bBbar + d * N, 1.0,
-          handle);
+  // wbar_d += KTUB_d^T * bBbar_d for each d: one strided-batched GEMM
+  // (S x 1 <- (N x S)^T * N x 1 per doc) instead of D cublasDgemv launches,
+  // which were a third of the host time of the whole GPU run
+  dgemm_strided_batched(wbar, S, 1.0, KTUB, true, (long long)N * S, bBbar,
+                        false, N, S, 1, N, 1.0, D, handle);
 }
 
 // column-wise softmax: out = softmax(in), each column independently
@@ -398,6 +399,21 @@ void softmax(double *out, double *in, int nrows, int ncols,
 void replicate_col(double *out, double *col, int nrows, int ncols,
                    cudaStream_t &stream) {
   replicate_col<<<nblocks(nrows * ncols), BLOCK_SIZE, 0, stream>>>(nrows, ncols, out, col);
+}
+
+// One batched barycenter iteration on D documents, given KVB = K * VB:
+//   UB = A / KVB;  KTUB = K^T UB;  bB = prod_s KTUB^w;  VB = bB / KTUB
+// (KTUB is left intact, bB uses `tmp` as N*S*D scratch). Training saves
+// KTUB and bB afterwards; both training and inference then recompute KVB.
+static void batched_forward_step(double *A, double *K, double *wB, double *UB,
+                                 double *VB, double *bB, double *KVB,
+                                 double *KTUB, double *tmp, int N, int S,
+                                 int D, cudaStream_t &stream,
+                                 cublasHandle_t &handle) {
+  update_UB(UB, A, KVB, N, S, D, stream);
+  update_KTUB(KTUB, K, UB, N, S, D, handle);
+  update_bB(bB, KTUB, wB, tmp, N, S, D, stream);
+  update_VB(VB, bB, KTUB, N, S, D, stream);
 }
 
 /*
@@ -431,10 +447,8 @@ void wdl_infer_batch(double *Yhat, double *A, double *W, double *K,
   const int bs = reduce_block(N * S);
   double err = 1000.0;
   for (int iter = 0; iter < max_iter && err > zero_tol; ++iter) {
-    update_UB(UB, A, KVB, N, S, D, stream);
-    update_KTUB(KTUB, K, UB, N, S, D, handle);
-    update_bB(bB, KTUB, wB, tmp, N, S, D, stream);
-    update_VB(VB, bB, KTUB, N, S, D, stream);
+    batched_forward_step(A, K, wB, UB, VB, bB, KVB, KTUB, tmp, N, S, D, stream,
+                         handle);
     update_KVB(KVB, K, VB, N, S, D, handle);
     // err = max over docs of the per-doc residual norm
     batched_sq_err<<<D, bs, bs * sizeof(double), stream>>>(N, S, d_err, UB,
@@ -511,28 +525,18 @@ void wdl_batch(
   init_ones(UB, N * S * D, stream);
   init_ones(VB, N * S * D, stream);
 
-  // ---- FORWARD: fixed max_iter iterations ----
+  // ---- FORWARD: fixed max_iter iterations, saving KVB, KTUB and bB ----
   for (int l = 0; l < max_iter; ++l) {
-    // KV = K * V
     update_KVB(KVB, K, VB, N, S, D, handle);
     cudaMemcpyAsync(KVB_hist + (size_t)l * N * S * D, KVB,
                     sizeof(double) * N * S * D, D2D, stream);
-
-    // U = A / KV
-    update_UB(UB, A, KVB, N, S, D, stream);
-
-    // KTU = K^T * U
-    update_KTUB(KTUB, K, UB, N, S, D, handle);
+    // UBbar is free scratch during the forward pass
+    batched_forward_step(A, K, wB, UB, VB, bB, KVB, KTUB, UBbar, N, S, D,
+                         stream, handle);
     cudaMemcpyAsync(KTUB_hist + (size_t)(l + 1) * N * S * D, KTUB,
                     sizeof(double) * N * S * D, D2D, stream);
-
-    // b = row_prod(KTU^w)  (KTUB left intact; UBbar is free scratch here)
-    update_bB(bB, KTUB, wB, UBbar, N, S, D, stream);
     cudaMemcpyAsync(bB_hist + (size_t)(l + 1) * N * D, bB,
                     sizeof(double) * N * D, D2D, stream);
-
-    // V = b / KTU
-    update_VB(VB, bB, KTUB, N, S, D, stream);
   }
 
   // ---- BACKWARD: l = max_iter down to 1 ----
@@ -624,7 +628,6 @@ void cuda_wdl(
   cudaStream_t stream;
   auto H2D = cudaMemcpyHostToDevice;
   auto D2H = cudaMemcpyDeviceToHost;
-  // auto D2D = cudaMemcpyDeviceToDevice;
 
   /* step 1: create cublas handle, bind a stream */
   cublasCreate(&handle);

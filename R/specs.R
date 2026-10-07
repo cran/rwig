@@ -12,7 +12,10 @@
 #' gradients are what WDL trains on) and `max_iter` is the fixed number of
 #' barycenter iterations per training step, so keep it small: the batched
 #' training keeps a history of `max_iter` iterations for every document
-#' in a batch.
+#' in a batch. WDL trains and predicts with the batched Gibbs-kernel
+#' barycenter (the "parallel" method), on all documents of a batch at once,
+#' so `method`, `threshold` and `n_threads` are not used by [wdl()] and
+#' [wig()]; `reg`, `max_iter`, `zero_tol` and `use_cuda` are.
 #'
 #' @references
 #'

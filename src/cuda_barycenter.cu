@@ -191,44 +191,6 @@ void backward(int &iter, double *Ubar, double *Vbar, double *bbar, double *Abar,
   }
 }
 
-// main interface for barycenter (forward + backward)
-void impl_barycenter(int &iter, double &err, double *U, double *V, double *b,
-                     double *Ubar, double *Vbar, double *bbar, double *Abar,
-                     double *wbar, double *Uhist, double *Vhist, double *bhist,
-                     double *KVhist, double *KTUhist, double *A, double *w,
-                     double *b_ext, double *K, double *KV, double *KTU,
-                     double *tmp_MS, int M, int N, int S, const int max_iter,
-                     const double zero_tol, bool withgrad, cudaStream_t &stream,
-                     cublasHandle_t &handle) {
-
-  auto D2D = cudaMemcpyDeviceToDevice;
-
-  if (withgrad) {
-    cudaMemsetAsync(Ubar, 0, sizeof(double) * M * S, stream);
-    cudaMemsetAsync(Vbar, 0, sizeof(double) * N * S, stream);
-    cudaMemsetAsync(bbar, 0, sizeof(double) * N, stream);
-    cudaMemsetAsync(Abar, 0, sizeof(double) * M * S, stream);
-    cudaMemsetAsync(wbar, 0, sizeof(double) * S, stream);
-  }
-
-  // init U, V to ones
-  init_ones(U, M * S, stream);
-  init_ones(V, N * S, stream);
-  if (withgrad) {
-    cudaMemcpyAsync(Uhist, U, sizeof(double) * M * S, D2D, stream);
-    cudaMemcpyAsync(Vhist, V, sizeof(double) * N * S, D2D, stream);
-  }
-
-  forward(iter, err, U, V, b, Uhist, Vhist, bhist, KVhist, KTUhist, A, w, K, KV,
-          KTU, tmp_MS, M, N, S, max_iter, zero_tol, withgrad, stream, handle);
-  if (withgrad) {
-    backward(iter, Ubar, Vbar, bbar, Abar, wbar, Uhist, Vhist, bhist, KVhist,
-             KTUhist, w, b_ext, K, KV, KTU, M, N, S, stream, handle);
-  }
-  // rescale at the end
-  normalize(b, N, handle);
-}
-
 // interface to be called from C++
 void cuda_barycenter_parallel(double *U, double *V, double *b, double *grad_A,
                               double *grad_w, double *loss, int *iter_out,
@@ -241,6 +203,7 @@ void cuda_barycenter_parallel(double *U, double *V, double *b, double *grad_A,
   cudaStream_t stream;
   auto H2D = cudaMemcpyHostToDevice;
   auto D2H = cudaMemcpyDeviceToHost;
+  auto D2D = cudaMemcpyDeviceToDevice;
 
   int iter = 0;
   double err = 1000.;
@@ -311,11 +274,27 @@ void cuda_barycenter_parallel(double *U, double *V, double *b, double *grad_A,
   cudaMemcpyAsync(d_K, C, sizeof(double) * M * N, H2D, stream);
   update_K(d_K, M, N, reg, stream);
 
-  /* step 5: computation*/
-  impl_barycenter(iter, err, d_U, d_V, d_b, d_Ubar, d_Vbar, d_bbar, d_Abar,
-                  d_wbar, d_U_hist, d_V_hist, d_b_hist, d_KV_hist, d_KTU_hist,
-                  d_A, d_w, d_b_ext, d_K, d_KV, d_KTU, d_tmp, M, N, S, max_iter,
-                  zero_tol, withgrad, stream, handle);
+  /* step 5: computation */
+  init_ones(d_U, M * S, stream);
+  init_ones(d_V, N * S, stream);
+  if (withgrad) {
+    cudaMemsetAsync(d_Ubar, 0, sizeof(double) * M * S, stream);
+    cudaMemsetAsync(d_Vbar, 0, sizeof(double) * N * S, stream);
+    cudaMemsetAsync(d_bbar, 0, sizeof(double) * N, stream);
+    cudaMemsetAsync(d_Abar, 0, sizeof(double) * M * S, stream);
+    cudaMemsetAsync(d_wbar, 0, sizeof(double) * S, stream);
+    cudaMemcpyAsync(d_U_hist, d_U, sizeof(double) * M * S, D2D, stream);
+    cudaMemcpyAsync(d_V_hist, d_V, sizeof(double) * N * S, D2D, stream);
+  }
+  forward(iter, err, d_U, d_V, d_b, d_U_hist, d_V_hist, d_b_hist, d_KV_hist,
+          d_KTU_hist, d_A, d_w, d_K, d_KV, d_KTU, d_tmp, M, N, S, max_iter,
+          zero_tol, withgrad, stream, handle);
+  if (withgrad) {
+    backward(iter, d_Ubar, d_Vbar, d_bbar, d_Abar, d_wbar, d_U_hist, d_V_hist,
+             d_b_hist, d_KV_hist, d_KTU_hist, d_w, d_b_ext, d_K, d_KV, d_KTU, M,
+             N, S, stream, handle);
+  }
+  normalize(d_b, N, handle); // rescale b to sum 1
   cudaMemsetAsync(d_loss, 0, sizeof(double), stream);
   update_loss(d_loss, d_b, d_b_ext, N, stream);
 

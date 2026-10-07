@@ -1,4 +1,28 @@
+# Makevars is read before R's makefile, so the first target must be R's
+all: $(SHLIB)
+
 PKG_CXXFLAGS = -I../inst/include -pthread @CUDA_FLAGS@ @CUDA_DEFS@
 PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS) @CUDA_LIBS@
 
 @CUDA_RULES@
+
+# Every object includes the package headers, so an edit there must rebuild
+# the objects of an in-place (incremental) install as well. Listed
+# explicitly (no $(wildcard): portable make); add new headers here.
+HEADERS = ../inst/include/barycenter_impl.hpp \
+  ../inst/include/check_cuda.hpp \
+  ../inst/include/common.hpp \
+  ../inst/include/cuda_interface.cuh \
+  ../inst/include/cuda_kernels.cuh \
+  ../inst/include/iter_solver.hpp \
+  ../inst/include/linalg.hpp \
+  ../inst/include/logdomain.hpp \
+  ../inst/include/optimizer.hpp \
+  ../inst/include/r_glue.hpp \
+  ../inst/include/sinkhorn_impl.hpp \
+  ../inst/include/thread_pool.hpp \
+  ../inst/include/timer.hpp \
+  ../inst/include/vexp.hpp \
+  ../inst/include/vformat.hpp \
+  ../inst/include/wdl_impl.hpp
+$(OBJECTS): $(HEADERS)

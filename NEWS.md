@@ -1,3 +1,40 @@
+# rwig 0.3.0
+
+Performance work driven by `perf` profiles; all solver outputs are checked
+against frozen outputs of version 0.2.0 (relative differences below 1e-11)
+and the Julia-derived reference solutions in the tests.
+
+- `wdl()`/`wig()` on the CPU now predict the document barycenters with the
+  same batched Gibbs-kernel iteration the training uses, on a whole batch of
+  documents at once. Before, inference solved one barycenter per document
+  and, with the default `method = "auto"`, did so in the log domain, which
+  cost about 20 times the whole training (2000 NYT headlines, 1 epoch:
+  33 minutes, now 33 seconds). `method`, `threshold` and `n_threads` of the
+  barycenter control are documented as unused by WDL.
+- The log-stabilized `sinkhorn()` and `barycenter()` exponentiate with a
+  vectorised rational approximation (1-2 ulp of `exp()`) instead of one
+  libm call per matrix entry, and log `sinkhorn()` no longer computes a
+  column soft-min per iteration whose only use, the column term of the
+  error, is identically zero. 1000 x 1000 log Sinkhorn, 1000 iterations:
+  19 s to 8 s on one thread.
+- Worker threads (`n_threads`) spin briefly between the short parallel
+  sections of an iteration instead of sleeping; 12 threads now give about
+  5x on the forward passes where they gave 3x.
+- The backward passes of the log-stabilized `sinkhorn()` and `barycenter()`
+  (`with_grad = TRUE`) no longer materialize the M x N softmax matrices: the
+  forward pass keeps its row and column soft-mins (M + N numbers per
+  iteration), from which each adjoint product is one fused sweep over the
+  cost matrix, split over the threads by column blocks. 1000 x 1000 log
+  Sinkhorn with gradient, 1000 iterations: 15.6 s to 13.2 s on one thread,
+  3.8 s to 2.1 s on 12; 800 x 800 log barycenter with gradients: 37.9 s to
+  33.9 s and 10.9 s to 5.2 s.
+- Kernel products with up to 4 right-hand columns (the "parallel"
+  `barycenter()`) use one `dsymv`/`dgemv` per column rather than a level-3
+  call that repacks the N x N kernel every time: 800 x 800 barycenter with
+  4 sources, 0.79 s to 0.34 s.
+- CUDA `wdl()`: the per-document `cublasDgemv` launches of the weight
+  adjoint are one strided-batched GEMM (2000 headlines: 5.6 s to 4.5 s).
+
 # rwig 0.2.0
 
 - Dropped the dependencies on Rcpp and RcppArmadillo. The C++ code talks to

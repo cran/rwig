@@ -29,13 +29,11 @@ private:
   la::idx _S; // number of topics
 
   // model related
-  int _B;         // number of docs per batch
-  int _E;         // number of epochs
-  int _n_threads; // number of threads, 0: serial (only used at inference)
+  int _B; // number of docs per batch
+  int _E; // number of epochs
 
-  // sinkhorn related
-  int _sinkmode;   // sinkhorn mode: vanilla (parallel) or log
-  int _maxiter;    // max iteration of sinkhorn/barycenter algo
+  // batched Gibbs-kernel barycenter (training and inference)
+  int _maxiter;    // max iterations per batch
   double _zerotol; // convergence tolerance
 
   // optimizer related
@@ -108,7 +106,13 @@ private:
   ///////////////////////////////////////////
 
   void _compute_serial();
+  // documents in batch `batch_id` (the last batch takes the remainder)
+  int _batch_docs(int batch_id) const {
+    return batch_id == (int)(_M / _B) ? (int)(_M % _B) : _B;
+  }
+  void _forward_step_batched(int D, const double *wB);
   void _train_batch_batched(int batch_id);
+  void _infer_batch_batched(int batch_id);
   // optimizer step: update _Alpha, _Lambda in place
   void _optimize() {
     _opt_Alpha.step(_opt, _Alpha, _g_Alpha);
@@ -123,8 +127,6 @@ public:
 
   // init the class
   WassersteinDictionaryLearning(const int batch_size, const int epochs,
-                                const int n_threads,
-                                const int sinkhorn_mode = 2,
                                 const int max_iter = 1000,
                                 const double zero_tol = 1e-6,
                                 const int optimizer = 2,
@@ -136,8 +138,6 @@ public:
                                 const bool verbose = false) {
     _B = batch_size;
     _E = epochs;
-    _n_threads = n_threads;
-    _sinkmode = sinkhorn_mode;
     _maxiter = max_iter;
     _zerotol = zero_tol;
     _opt = optimizer;

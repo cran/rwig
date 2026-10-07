@@ -34,28 +34,17 @@ void Barycenter::_fwd_parallel() {
   this->b.resize(_N);
   this->U.resize(_M, _S, 1.0);
   this->V.resize(_N, _S, 1.0);
-  if (_withgrad) {
-    _Uhist.clear();
-    _Vhist.clear();
-    _bhist.clear();
-    _KVhist.clear();
-    _KTUhist.clear();
-    _Uhist.reserve(_maxiter + 1);
-    _Vhist.reserve(_maxiter + 1);
-    _bhist.reserve(_maxiter + 1);
-    _KVhist.reserve(_maxiter + 1);
-    _KTUhist.reserve(_maxiter + 1);
-    _Uhist.push_back(this->U);
-    _Vhist.push_back(this->V);
-    _bhist.push_back(this->b);
-    _KTUhist.push_back(la::Mat(_N, _S)); // slot 0 unused (K^T U^0 never needed)
-  }
-
   _K.set(_C, _reg);
   _KV.resize(_M, _S);
   _KTU.resize(_N, _S);
   _K.mul(false, this->V, _KV);
-  if (_withgrad) _KVhist.push_back(_KV); // K V^0
+  if (_withgrad) {
+    reset_history(_Uhist, _maxiter, this->U);
+    reset_history(_Vhist, _maxiter, this->V);
+    reset_history(_bhist, _maxiter, this->b);
+    reset_history(_KVhist, _maxiter, _KV);            // K V^0
+    reset_history(_KTUhist, _maxiter, la::Mat(_N, _S)); // slot 0 unused
+  }
   _log_stage("Forward pass:");
 
   while (_keep_going()) {
@@ -88,12 +77,8 @@ void Barycenter::_fwd_parallel() {
     // term cond: err = || U % KV - A ||_F
     _K.mul(false, this->V, _KV);
     if (_withgrad) _KVhist.push_back(_KV); // K V^l
-    double e = 0.0;
-    for (la::idx k = 0; k < this->U.size(); ++k) {
-      const double d = this->U[k] * _KV[k] - _A[k];
-      e += d * d;
-    }
-    err = std::sqrt(e);
+    err = std::sqrt(la::resid_sq(this->U.size(), this->U.data(), _KV.data(),
+                                 _A.data()));
     _toc_fwd();
   }
 }

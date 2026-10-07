@@ -10,6 +10,98 @@
 #include "vformat.hpp"         // vformat formatting the logging message
 
 ///////////////////////////////////////////////////////////////////
+// One batched barycenter step for the D docs of a batch, given KVB = K VB:
+//   UB = A_tiled / KVB,  KTUB = K^T UB,  bB = prod_s KTUB^w,  VB = bB / KTUB
+// KVB, UB, KTUB and bB are left intact for the caller (history, residuals).
+///////////////////////////////////////////////////////////////////
+
+void WassersteinDictionaryLearning::_forward_step_batched(int D, const double *wB) {
+  const la::idx N = _N, S = _S;
+  const la::idx SD = S * (la::idx)D;
+
+  // UB[:,d*S+s] = A[:,s] / KVB[:,d*S+s]
+  for (la::idx c = 0; c < SD; ++c) {
+    const double *As = this->A.col(c % S);
+    const double *KVc = _KVB.col(c);
+    double *Uc = _UB.col(c);
+    for (la::idx i = 0; i < N; ++i) Uc[i] = As[i] / KVc[i];
+  }
+
+  // KTUB = K^T * UB  (one big GEMM)
+  _K.mul(true, _UB, _KTUB, SD);
+
+  // bB[:,d] = prod_s( KTUB[:,d*S+s] ^ wB[s,d] )
+  for (int d = 0; d < D; ++d) {
+    double *bd = _bB.col(d);
+    for (la::idx i = 0; i < N; ++i) bd[i] = 1.0;
+    for (la::idx s = 0; s < S; ++s) {
+      const double *KTUc = _KTUB.col((la::idx)d * S + s);
+      const double w = wB[s + (la::idx)d * S];
+      for (la::idx i = 0; i < N; ++i) bd[i] *= std::pow(KTUc[i], w);
+    }
+  }
+
+  // VB[:,d*S+s] = bB[:,d] / KTUB[:,d*S+s]
+  for (la::idx c = 0; c < SD; ++c) {
+    const double *bd = _bB.col(c / S);
+    const double *KTUc = _KTUB.col(c);
+    double *Vc = _VB.col(c);
+    for (la::idx i = 0; i < N; ++i) Vc[i] = bd[i] / KTUc[i];
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Batched inference: barycenters of the D docs of a batch at once
+// (forward only, no history). Same iteration and stopping rule as
+// Barycenter::_fwd_parallel on a single document, with the residual
+// ||U % KV - A||_F taken as the maximum over the docs of the batch, so a
+// document that converges early keeps iterating with its batch (which only
+// moves it closer to its fixed point). The normalised barycenters go to
+// the columns of Yhat.
+///////////////////////////////////////////////////////////////////
+
+void WassersteinDictionaryLearning::_infer_batch_batched(int batch_id) {
+  rr::check_interrupt();
+  const int D = _batch_docs(batch_id);
+  const la::idx N = _N, S = _S;
+  const la::idx SD = S * (la::idx)D;
+  const la::idx m0 = (la::idx)batch_id * _B;
+  const double *wB = this->W.col(m0); // S x D
+
+  _VB.fill(1.0);
+  int iter = 0;
+  for (;;) {
+    if (iter >= _maxiter) break; // the residual could not change the decision
+    _K.mul(false, _VB, _KVB, SD); // KVB = K * VB
+    if (iter > 0) {
+      // err = max_d || UB_d % KVB_d - A ||_F  (UB is from the last step)
+      double err = 0.0;
+      for (int d = 0; d < D; ++d) {
+        double e = 0.0;
+        for (la::idx s = 0; s < S; ++s) {
+          const la::idx c = (la::idx)d * S + s;
+          e += la::resid_sq(N, _UB.col(c), _KVB.col(c), this->A.col(s));
+        }
+        err = std::max(err, std::sqrt(e));
+      }
+      if (err < _zerotol) break;
+    }
+    ++iter;
+    rr::check_interrupt();
+    _forward_step_batched(D, wB);
+  }
+
+  // b <- b / sum(b) into Yhat
+  for (int d = 0; d < D; ++d) {
+    const double *bd = _bB.col(d);
+    double *out = Yhat.col(m0 + d);
+    double bsum = 0.0;
+    for (la::idx i = 0; i < N; ++i) bsum += bd[i];
+    for (la::idx i = 0; i < N; ++i) out[i] = bd[i] / bsum;
+  }
+}
+
+///////////////////////////////////////////////////////////////////
 // Batched: process all D docs in a batch simultaneously
 // Mirrors cuda wdl_batch — bypasses Barycenter class.
 //
@@ -23,8 +115,7 @@
 void WassersteinDictionaryLearning::_train_batch_batched(int batch_id) {
   rr::check_interrupt();
 
-  // number of docs in this batch
-  const int D = (batch_id == (int)(_M / _B)) ? (int)(_M % _B) : _B;
+  const int D = _batch_docs(batch_id);
   const la::idx N = _N, S = _S;
   const la::idx SD = S * (la::idx)D;
   const la::idx NSD = N * SD, ND = N * (la::idx)D;
@@ -43,42 +134,11 @@ void WassersteinDictionaryLearning::_train_batch_batched(int batch_id) {
   _VB.fill(1.0);
   for (int l = 0; l < L; ++l) {
     rr::check_interrupt();
-
-    // KVB = K * VB  (one big GEMM: N x N * N x SD)
-    _K.mul(false, _VB, _KVB, SD);
+    _K.mul(false, _VB, _KVB, SD); // KVB = K * VB  (one big GEMM)
+    _forward_step_batched(D, wB);
     std::copy(_KVB.data(), _KVB.data() + NSD, KVB_h(l));
-
-    // UB[:,d*S+s] = A[:,s] / KVB[:,d*S+s]
-    for (la::idx c = 0; c < SD; ++c) {
-      const double *As = this->A.col(c % S);
-      const double *KVc = _KVB.col(c);
-      double *Uc = _UB.col(c);
-      for (la::idx i = 0; i < N; ++i) Uc[i] = As[i] / KVc[i];
-    }
-
-    // KTUB = K^T * UB  (one big GEMM)
-    _K.mul(true, _UB, _KTUB, SD);
     std::copy(_KTUB.data(), _KTUB.data() + NSD, KTUB_h(l + 1));
-
-    // bB[:,d] = prod_s( KTUB[:,d*S+s] ^ wB[s,d] )
-    for (int d = 0; d < D; ++d) {
-      double *bd = _bB.col(d);
-      for (la::idx i = 0; i < N; ++i) bd[i] = 1.0;
-      for (la::idx s = 0; s < S; ++s) {
-        const double *KTUc = _KTUB.col((la::idx)d * S + s);
-        const double w = wB[s + (la::idx)d * S];
-        for (la::idx i = 0; i < N; ++i) bd[i] *= std::pow(KTUc[i], w);
-      }
-    }
     std::copy(_bB.data(), _bB.data() + ND, bB_h(l + 1));
-
-    // VB[:,d*S+s] = bB[:,d] / KTUB[:,d*S+s]
-    for (la::idx c = 0; c < SD; ++c) {
-      const double *bd = _bB.col(c / S);
-      const double *KTUc = _KTUB.col(c);
-      double *Vc = _VB.col(c);
-      for (la::idx i = 0; i < N; ++i) Vc[i] = bd[i] / KTUc[i];
-    }
   }
 
   // ---- BACKWARD: l = L down to 1 ----
@@ -309,29 +369,11 @@ void WassersteinDictionaryLearning::_compute_serial() {
     rr::message(("Inference on the dataset"));
   }
 
-  // init a barycenter class for inference (no gradients)
-  Barycenter bc((int)_S, false, _maxiter, _zerotol, 0);
-  bc.update_C(_C);
-  bc.update_reg(_reg);
-  bc.update_A(this->A);
-
-  // output (predicted barycenters)
+  // output (predicted barycenters), one batch of docs at a time with the
+  // same Gibbs-kernel iteration the training used (the log-domain
+  // barycenter per document was 20x the cost of the whole training)
   Yhat.resize(_N, _M);
-  la::Vec what(_S);
-  for (la::idx m = 0; m < _M; ++m) {
-    const double *wm = this->W.col(m);
-    for (la::idx s = 0; s < _S; ++s) what[s] = wm[s];
-
-    bc.update_w(what);
-
-    if (_sinkmode == 1) {
-      bc.compute_parallel();
-    } else if (_sinkmode == 2) {
-      bc.compute_log(_n_threads);
-    } else {
-      throw std::runtime_error("barycenter method not supported");
-    }
-
-    std::copy(bc.b.data(), bc.b.data() + _N, Yhat.col(m));
+  for (int batch_id = 0; batch_id < batches; ++batch_id) {
+    _infer_batch_batched(batch_id);
   }
 }

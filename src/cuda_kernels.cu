@@ -334,6 +334,20 @@ void dgemm(double *C, double alpha, double *A, bool transA, double *B,
   cublasDgemm(handle, opA, opB, M, N, K, &alpha, A, lda, B, ldb, &beta, C, ldc);
 }
 
+void dgemm_strided_batched(double *C, long long strideC, double alpha,
+                           double *A, bool transA, long long strideA,
+                           double *B, bool transB, long long strideB, int M,
+                           int N, int K, double beta, int batch,
+                           cublasHandle_t &handle) {
+  cublasOperation_t opA = transA ? CUBLAS_OP_T : CUBLAS_OP_N;
+  cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
+  int lda = transA ? K : M;
+  int ldb = transB ? N : K;
+  int ldc = M;
+  cublasDgemmStridedBatched(handle, opA, opB, M, N, K, &alpha, A, lda, strideA,
+                            B, ldb, strideB, &beta, C, ldc, strideC, batch);
+}
+
 /*
   kernels shared by Sinkhorn and Barycenter
 */

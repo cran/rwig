@@ -20,7 +20,7 @@ void Sinkhorn::compute_log(const la::Vec &a, const la::Vec &b, const la::Mat &C,
   _reg = reg;
   _Rminrow.resize(_M);
   _Rmincol.resize(_N);
-  _scratch.resize((int)_M, (int)_N, _withgrad);
+  _scratch.resize((int)_M);
 
   ThreadPool pool(n_threads); // worker threads live for the whole computation
   _fwd_log(pool);
@@ -47,12 +47,8 @@ void Sinkhorn::_fwd_log(ThreadPool &pool) {
   _u.resize(_M); // f
   _v.resize(_N); // g
   if (_withgrad) {
-    _uhist.clear();
-    _vhist.clear();
-    _uhist.reserve(_maxiter + 1);
-    _vhist.reserve(_maxiter + 1);
-    _uhist.push_back(_u);
-    _vhist.push_back(_v);
+    reset_history(_uhist, _maxiter, _u);
+    reset_history(_vhist, _maxiter, _v);
   }
   _loga.resize(_M);
   _logb.resize(_N);
@@ -61,6 +57,7 @@ void Sinkhorn::_fwd_log(ThreadPool &pool) {
   _log_stage("Forward pass:");
 
   logdom::soft_min_rows(pool, p, _u.data(), _v.data(), _Rminrow.data(), _scratch);
+  if (_withgrad) reset_history(_Rminrowhist, _maxiter, _Rminrow);
 
   while (_keep_going()) {
     rr::check_interrupt();
@@ -76,19 +73,17 @@ void Sinkhorn::_fwd_log(ThreadPool &pool) {
     for (la::idx j = 0; j < _N; ++j) _v[j] += _reg * _logb[j] + _Rmincol[j];
     if (_withgrad) _vhist.push_back(_v);
 
-    // both soft-mins for the termination check (Rminrow is reused next iter)
+    // termination check on the row marginals (Rminrow is reused next iter).
+    // The column term vanishes identically: the column soft-min is linear
+    // in g, so right after the g update -Rmincol / reg == log b exactly.
     logdom::soft_min_rows(pool, p, _u.data(), _v.data(), _Rminrow.data(), _scratch);
-    logdom::soft_min_cols(pool, p, _u.data(), _v.data(), _Rmincol.data());
-    double e1 = 0.0, e2 = 0.0;
+    if (_withgrad) _Rminrowhist.push_back(_Rminrow);
+    double e1 = 0.0;
     for (la::idx i = 0; i < _M; ++i) {
       const double d = -_Rminrow[i] / _reg - _loga[i];
       e1 += d * d;
     }
-    for (la::idx j = 0; j < _N; ++j) {
-      const double d = -_Rmincol[j] / _reg - _logb[j];
-      e2 += d * d;
-    }
-    err = std::sqrt(e1) + std::sqrt(e2);
+    err = std::sqrt(e1);
     _toc_fwd();
   }
 }
@@ -116,6 +111,11 @@ void Sinkhorn::_bwd_log(ThreadPool &pool) {
   _grad_a.resize(_M);
   _log_stage("Backward pass:");
 
+  // column soft-min of R(f^l, g^l) for every l >= 1: the column soft-min is
+  // linear in g, so the g update of iteration l sets it to -reg log b exactly
+  la::Vec clse(_N);
+  for (la::idx j = 0; j < _N; ++j) clse[j] = -_reg * _logb[j];
+
   for (int l = iter; l > 0; --l) {
     _tic();
     const double *f = _uhist[l].data();
@@ -125,11 +125,13 @@ void Sinkhorn::_bwd_log(ThreadPool &pool) {
     if (l == iter) {
       for (la::idx j = 0; j < _N; ++j) gbar[j] = PbarP_cols[j] / _reg;
     } else {
-      logdom::apply_XT(pool, p, f, g, -1.0, fbar.data(), gbar.data(), _scratch);
+      logdom::apply_XT(pool, p, f, g, _Rminrowhist[l].data(), -1.0,
+                       fbar.data(), gbar.data());
     }
 
     // adjoint of f: fbar = -W gbar (+ PbarP 1 / reg at \ell = L)
-    logdom::apply_W(pool, p, f, g, -1.0, gbar.data(), fbar.data(), _scratch);
+    logdom::apply_W(pool, p, f, g, clse.data(), -1.0, gbar.data(), fbar.data(),
+                    _scratch);
     if (l == iter) {
       for (la::idx i = 0; i < _M; ++i) fbar[i] += PbarP_rows[i] / _reg;
     }

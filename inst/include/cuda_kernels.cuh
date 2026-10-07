@@ -92,6 +92,13 @@ void dger(double *A, int M, int N, double alpha, double *x, double *y,
 void dgemm(double *C, double alpha, double *A, bool transA, double *B,
            bool transB, int M, int N, int K, double beta,
            cublasHandle_t &handle);
+// `batch` products at once: C_i = alpha op(A_i) op(B_i) + beta C_i with
+// A_i = A + i * strideA etc.; dimensions and layout as in dgemm
+void dgemm_strided_batched(double *C, long long strideC, double alpha,
+                           double *A, bool transA, long long strideA,
+                           double *B, bool transB, long long strideB, int M,
+                           int N, int K, double beta, int batch,
+                           cublasHandle_t &handle);
 
 // kernels for the Sinkhorn/Barycenter
 void init_ones(double *x, int n, cudaStream_t &stream);
@@ -105,15 +112,5 @@ void optimizer_step(double *d_theta, double *d_g, double *d_m, double *d_v,
                     double beta2, double eps, int step, cudaStream_t &stream);
 
 // internal barycenter interface (also used by cuda_wdl for inference)
-// tmp_MS is a max(M, N)*S scratch buffer (convergence check, product of powers).
-// The history buffers are only touched when withgrad is true.
-void impl_barycenter(int &iter, double &err, double *U, double *V, double *b,
-                     double *Ubar, double *Vbar, double *bbar, double *Abar,
-                     double *wbar, double *Uhist, double *Vhist, double *bhist,
-                     double *KVhist, double *KTUhist, double *A, double *w,
-                     double *b_ext, double *K, double *KV, double *KTU,
-                     double *tmp_MS, int M, int N, int S, const int max_iter,
-                     const double zero_tol, bool withgrad, cudaStream_t &stream,
-                     cublasHandle_t &handle);
 
 #endif // RWIG_CUDA_KERNELS_CUH
